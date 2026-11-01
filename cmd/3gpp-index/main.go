@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/higebu/3gpp-mcp/internal/asn1index"
 	"github.com/higebu/3gpp-mcp/internal/db"
@@ -34,7 +35,8 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	client := etsi.Client{Base: *base}
+	client := etsi.Client{Base: *base, Progress: func(message string) { log.Print(message) }}
+	log.Print("Starting ETSI catalogue discovery; this can take a long time")
 	docs, err := client.Discover(ctx)
 	if err != nil {
 		log.Fatal(err)
@@ -51,7 +53,16 @@ func main() {
 	jobs := make(chan etsi.Document)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var failures, indexed, skipped int
+	var failures, indexed, skipped, resumed, completed int
+	started := time.Now()
+	report := func() {
+		elapsed := time.Since(started)
+		eta := "unknown"
+		if completed > 0 && completed < len(docs) {
+			eta = (elapsed * time.Duration(len(docs)-completed) / time.Duration(completed)).Round(time.Second).String()
+		}
+		log.Printf("Progress: %d/%d (%.1f%%); indexed=%d, non-3GPP=%d, already indexed=%d, failed=%d; elapsed=%s; estimated remaining=%s", completed, len(docs), 100*float64(completed)/float64(len(docs)), indexed, skipped, resumed, failures, elapsed.Round(time.Second), eta)
+	}
 	for i := 0; i < *workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -61,16 +72,22 @@ func main() {
 					log.Printf("Skipping non-3GPP ETSI publication %s", doc.URL)
 					mu.Lock()
 					skipped++
+					completed++
+					report()
 					mu.Unlock()
 				} else if e != nil {
 					log.Printf("%s v%s: %v", doc.ID, doc.Version, e)
 					mu.Lock()
 					failures++
+					completed++
+					report()
 					mu.Unlock()
 				} else {
 					log.Printf("Indexed %s v%s", doc.ID, doc.Version)
 					mu.Lock()
 					indexed++
+					completed++
+					report()
 					mu.Unlock()
 				}
 			}
@@ -113,6 +130,11 @@ sendJobs:
 					continue
 				}
 				if ready {
+					mu.Lock()
+					resumed++
+					completed++
+					report()
+					mu.Unlock()
 					continue
 				}
 			}

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/higebu/3gpp-mcp/internal/db"
 	"golang.org/x/net/html"
@@ -102,8 +103,32 @@ func coverMetadata(text, fallback string) (string, string, []string) {
 
 type Document struct{ ID, Version, Series, URL string }
 type Client struct {
-	Base string
-	HTTP *http.Client
+	Progress func(string)
+	Base     string
+	HTTP     *http.Client
+}
+
+func (c Client) progress(format string, args ...any) {
+	if c.Progress != nil {
+		c.Progress(fmt.Sprintf(format, args...))
+	}
+}
+
+type progressWriter struct {
+	out      io.Writer
+	total, n int64
+	last     time.Time
+	report   func(int64, int64)
+}
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	n, err := p.out.Write(b)
+	p.n += int64(n)
+	if time.Since(p.last) >= 5*time.Second {
+		p.report(p.n, p.total)
+		p.last = time.Now()
+	}
+	return n, err
 }
 
 func (c Client) client() *http.Client {
@@ -200,6 +225,7 @@ func (c Client) Discover(ctx context.Context) ([]Document, error) {
 	var docs []Document
 	for _, kind := range []string{"etsi_ts/", "etsi_tr/"} {
 		root := join(base, kind)
+		c.progress("Discovery: reading %s", root)
 		groups, err := c.listing(ctx, root)
 		if err != nil {
 			return nil, err
@@ -211,6 +237,7 @@ func (c Client) Discover(ctx context.Context) ([]Document, error) {
 			}
 			count++
 			gp := join(root, group)
+			c.progress("Discovery: %s%s; PDF candidates found: %d", kind, group, len(docs))
 			specs, e := c.listing(ctx, gp)
 			if e != nil {
 				return nil, e
@@ -220,6 +247,7 @@ func (c Client) Discover(ctx context.Context) ([]Document, error) {
 					continue
 				}
 				sp := join(gp, spec)
+				c.progress("Discovery: checking %s%s%s", kind, group, spec)
 				versions, e := c.listing(ctx, sp)
 				if e != nil {
 					return nil, e
@@ -370,7 +398,16 @@ func (c Client) Import(ctx context.Context, d *db.DB, doc Document) error {
 		return err
 	}
 	defer os.Remove(f.Name())
-	n, err := io.Copy(f, io.LimitReader(resp.Body, maxPDF+1))
+	c.progress("%s v%s: downloading PDF", doc.ID, doc.Version)
+	downloadStart := time.Now()
+	writer := &progressWriter{out: f, total: resp.ContentLength, last: time.Now(), report: func(n, total int64) {
+		if total > 0 {
+			c.progress("%s v%s: downloaded %.1f / %.1f MiB (%.0f%%), %.2f MiB/s", doc.ID, doc.Version, float64(n)/(1<<20), float64(total)/(1<<20), 100*float64(n)/float64(total), float64(n)/(1<<20)/time.Since(downloadStart).Seconds())
+		} else {
+			c.progress("%s v%s: downloaded %.1f MiB", doc.ID, doc.Version, float64(n)/(1<<20))
+		}
+	}}
+	n, err := io.Copy(writer, io.LimitReader(resp.Body, maxPDF+1))
 	closeErr := f.Close()
 	if err != nil {
 		return err
@@ -391,6 +428,7 @@ func (c Client) Import(ctx context.Context, d *db.DB, doc Document) error {
 	if err != nil || string(header) != "%PDF-" {
 		return fmt.Errorf("%s: response is not a PDF", doc.URL)
 	}
+	c.progress("%s v%s: downloaded %.1f MiB; extracting PDF text", doc.ID, doc.Version, float64(n)/(1<<20))
 	out, err := exec.CommandContext(ctx, "pdftotext", "-layout", f.Name(), "-").Output()
 	if err != nil {
 		return fmt.Errorf("extract %s: %w", path.Base(doc.URL), err)
@@ -429,5 +467,6 @@ func (c Client) Import(ctx context.Context, d *db.DB, doc Document) error {
 	if err != nil {
 		return err
 	}
+	c.progress("%s v%s: indexing %d sections in SQLite", doc.ID, doc.Version, len(sections))
 	return d.InsertSpecWithSections(spec, sections)
 }
