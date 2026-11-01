@@ -37,6 +37,7 @@ var ErrNot3GPP = errors.New("ETSI PDF is not identified as a 3GPP specification"
 
 var pageRE = regexp.MustCompile(`^\s*(?:ETSI\s*|3GPP (?:TS|TR)\s+.*\bversion\b.*\bETSI\s+(?:TS|TR)\s+.*|ETSI\s+(?:TS|TR)\s+[0-9].*\bV[0-9].*)\s*$`)
 var tocLineRE = regexp.MustCompile(`^\s*((?:[0-9]+[A-Za-z]?(?:\.[0-9]+[A-Za-z]?)*|[A-Z](?:\.[0-9]+[A-Za-z]?)+))\s+(.+?)\s*\.{3,}\s*[0-9]+\s*$`)
+var coverDesignationRE = regexp.MustCompile(`(?i)\b3GPP\s+(?:TS|TR)\b`)
 var generationRE = regexp.MustCompile(`(?i)\b(GSM|UMTS|LTE|2G|3G|4G|5G|6G)\b`)
 
 // coverMetadata separates the ETSI cover's semicolon-delimited technology,
@@ -442,7 +443,7 @@ func (c Client) Import(ctx context.Context, d *db.DB, doc Document) error {
 	}
 	match := coverRE.FindStringSubmatch(cover)
 	if match == nil {
-		if strings.Contains(strings.ToUpper(cover), "3GPP") || len(strings.TrimSpace(cover)) < 50 {
+		if coverDesignationRE.MatchString(cover) || len(strings.TrimSpace(cover)) < 50 {
 			return fmt.Errorf("%s: cannot reliably identify 3GPP publication from PDF cover", doc.URL)
 		}
 		return fmt.Errorf("%s: %w", doc.URL, ErrNot3GPP)

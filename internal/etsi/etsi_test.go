@@ -2,6 +2,7 @@ package etsi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -297,5 +298,20 @@ Still part of charging.
 	}
 	if len(got.Specs) != 1 || got.Specs[0].Title != spec.Title || got.Specs[0].Area != spec.Area || strings.Join(got.Specs[0].Generations, ",") != "2G,3G,4G,5G" {
 		t.Fatalf("stored metadata: %+v", got.Specs)
+	}
+}
+
+func TestImportSkipsETSIDocumentMentioning3GPPRelease(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprintf 'ETSI Technical Specification Diameter Conformance testing for Gx interface (3GPP Release 10); Part 1: Conformance Statement\\n\\f'\n"
+	if err := os.WriteFile(filepath.Join(dir, "pdftotext"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "%PDF-1.7\ntest") }))
+	defer s.Close()
+	err := (Client{}).Import(context.Background(), nil, Document{ID: "TS 01.606-01", Version: "2.1.1", URL: s.URL + "/ts_10160601v020101p.pdf"})
+	if !errors.Is(err, ErrNot3GPP) {
+		t.Fatalf("want ErrNot3GPP, got %v", err)
 	}
 }
