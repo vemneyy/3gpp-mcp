@@ -1,3 +1,38 @@
+# ETSI PDF indexing and MCP server
+
+The recommended pipeline has two independent programs. `3gpp-index` discovers candidate Technical Specifications and Technical Reports under ETSI's `deliver/etsi_ts` and `deliver/etsi_tr` directories, downloads the newest published PDF for each candidate, verifies the 3GPP identifier on the cover and extracts its text with Poppler `pdftotext`, and stores clauses in SQLite with FTS5. `3gpp-server` opens that database read-only and serves MCP via stdio or HTTP. Go 1.26+ and Poppler (`pdftotext`) are required on the indexing machine.
+
+```sh
+make build
+./bin/3gpp-index --db data/etsi.db --workers 4
+./bin/3gpp-server --db data/etsi.db
+# HTTP transport:
+./bin/3gpp-server --db data/etsi.db --transport http --addr :8080
+```
+
+## Docker Compose
+
+Build the indexer on the host and create the database there (requires Go 1.26+ and Poppler `pdftotext`):
+
+```sh
+mkdir -p data bin
+go build -o bin/3gpp-index ./cmd/3gpp-index
+./bin/3gpp-index --db data/3gpp.db --workers 4
+docker compose up --build -d
+```
+
+The container runs only the MCP server. Compose mounts `./data` read-only at `/data`; the server reads `/data/3gpp.db` and listens at `http://127.0.0.1:8080/`. Configure the host directory with `MCP_DATA_DIR`, or the bind address and port with `MCP_BIND_ADDRESS` and `MCP_PORT`. The container's non-root user must be able to traverse the directory and read the database. Publishing on a non-loopback address exposes an unauthenticated MCP endpoint.
+
+After a successful index build, the indexer checkpoints SQLite and switches it out of WAL mode for read-only use. Stop the container before updating the database with `--resume`, and restart it after the update finishes. Do not serve a partial database after an unsuccessful indexing run.
+
+The indexer uses a Chrome uTLS ClientHello for HTTPS, respects HTTPS_PROXY and NO_PROXY, and verifies certificates. HTTP/2 is used when available; HTTP/1.1 is used as a fallback.
+
+The initial crawl and full download can take a long time. The indexer exits with an error if a directory or PDF fails; the database is then partial. Run the same command with `--resume` to retry missing documents and update changed versions. Existing indexed versions are skipped. Discovery itself must succeed before the database is changed. `--base` can point to an ETSI-compatible mirror or a test server. The ETSI site must allow directory listings and PDF downloads. ETSI may return HTTP 403 for some directories or individual PDFs; in that case the indexer exits with an error rather than reporting a complete database. The source catalog must be accessible to establish which version is newest.
+
+The database holds one latest version per specification. PDF extraction preserves plain text and approximates clause boundaries; tables, formulas, figures and headings can differ from the original PDF. The PDF server provides `list_specs`, `list_versions`, `get_toc`, `get_section`, `search` and `get_references`; it does not fetch historical versions, meeting documents, images, or separate OpenAPI files. The older combined CLI and DOCX/FTP pipeline remain available for compatibility; the legacy documentation below describes those commands and capabilities, not the PDF server.
+
+---
+
 # 3gpp-mcp
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/higebu/3gpp-mcp.svg)](https://pkg.go.dev/github.com/higebu/3gpp-mcp)

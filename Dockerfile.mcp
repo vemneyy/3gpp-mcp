@@ -1,0 +1,12 @@
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=secret,id=build_ca if [ -f /run/secrets/build_ca ]; then SSL_CERT_FILE=/run/secrets/build_ca go mod download; else go mod download; fi
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /3gpp-server ./cmd/3gpp-server
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /3gpp-server /3gpp-server
+EXPOSE 8080
+ENTRYPOINT ["/3gpp-server"]
+CMD ["-db", "/data/3gpp.db", "-transport", "http", "-addr", ":8080"]

@@ -65,7 +65,10 @@ func (s *Source) ListVersions(ctx context.Context, specID string) (versions []Ve
 	releases := map[string]string{}
 	tokens := map[string]string{}
 
-	archived, archiveErr := pipeline.ListVersions(ctx, s.Client, specID, s.UseCache)
+	var archived []*pipeline.SpecVersion
+	if !s.DatabaseOnly {
+		archived, archiveErr = pipeline.ListVersions(ctx, s.Client, specID, s.UseCache)
+	}
 	for _, sv := range archived {
 		dotted, ok := specver.TokenToDotted(sv.Version)
 		if !ok {

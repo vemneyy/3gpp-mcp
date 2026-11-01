@@ -2848,3 +2848,16 @@ func TestSanitizeFTS5QueryColumns(t *testing.T) {
 		t.Errorf("unknown column kept as a filter: %q", got)
 	}
 }
+
+func TestExtractReferencesCommaSeparatedClauses(t *testing.T) {
+	refs := ExtractReferences("TS 23.501", "4", "clause 4.1, clause 4.2 of TS 23.502", nil)
+	found := map[string]bool{}
+	for _, r := range refs {
+		if r.TargetSpec == "TS 23.502" {
+			found[r.TargetSection] = true
+		}
+	}
+	if !found["4.1"] || !found["4.2"] {
+		t.Fatalf("missing comma-separated clauses: %+v", refs)
+	}
+}
