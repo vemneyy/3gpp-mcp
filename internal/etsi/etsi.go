@@ -30,7 +30,7 @@ var specRE = regexp.MustCompile(`^1[0-9]{5}(?:[0-9]{2})?/$`)
 var versionRE = regexp.MustCompile(`^([0-9]{2})\.([0-9]{2})\.([0-9]{2})_[0-9]+/$`)
 var pdfRE = regexp.MustCompile(`(?i)^(ts|tr)_1([0-9]{5}(?:[0-9]{2})?)v([0-9]{2})([0-9]{2})([0-9]{2})p\.pdf$`)
 var headingRE = regexp.MustCompile(`^\s*((?:[0-9]+[A-Za-z]?(?:\.[0-9]+[A-Za-z]?)*|[A-Z](?:\.[0-9]+[A-Za-z]?)+))\s+([^\n]{2,180}?)\s*$`)
-var coverRE = regexp.MustCompile(`(?i)3GPP\s+(TS|TR)\s+([0-9]{2}\.[0-9]{3}(?:-[0-9]+)?)\s+version\s+([0-9]+\.[0-9]+\.[0-9]+)`)
+var coverRE = regexp.MustCompile(`(?i)3GPP\s+(TS|TR)\s+([0-9]{2}\.[0-9]{2,3}(?:-[0-9]+)?)\s+version\s+([0-9]+\.[0-9]+\.[0-9]+)`)
 
 // ErrNot3GPP marks an ETSI publication whose cover does not identify it as a 3GPP specification.
 var ErrNot3GPP = errors.New("ETSI PDF is not identified as a 3GPP specification")
@@ -294,8 +294,138 @@ func (c Client) Discover(ctx context.Context) ([]Document, error) {
 			return nil, fmt.Errorf("no 3GPP directories found at %s", root)
 		}
 	}
+	en, err := c.discoverMobileEN(ctx, join(base, "etsi_en/"))
+	if err != nil {
+		return nil, err
+	}
+	docs = append(docs, en...)
+	gts, err := c.discoverGTS(ctx, join(base, "etsi_gts/"))
+	if err != nil {
+		return nil, err
+	}
+	docs = append(docs, gts...)
 	if len(docs) == 0 {
 		return nil, fmt.Errorf("no ETSI PDFs discovered")
+	}
+	return docs, nil
+}
+
+// discoverMobileEN selects the cellular radio equipment families EN 301 908 and EN 301 502.
+func (c Client) discoverMobileEN(ctx context.Context, root string) ([]Document, error) {
+	groups, err := c.listing(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	var docs []Document
+	fileRE := regexp.MustCompile(`(?i)^en_([0-9]{6}(?:[0-9]{2})?)v([0-9]{2})([0-9]{2})([0-9]{2})p\.pdf$`)
+	for _, g := range groups {
+		if g != "301900_301999/" && g != "301500_301599/" {
+			continue
+		}
+		c.progress("Discovery: etsi_en/%s", g)
+		specs, e := c.listing(ctx, join(root, g))
+		if e != nil {
+			return nil, e
+		}
+		for _, sp := range specs {
+			num := strings.TrimSuffix(sp, "/")
+			if !strings.HasPrefix(num, "301908") && !strings.HasPrefix(num, "301502") {
+				continue
+			}
+			address := join(join(root, g), sp)
+			vs, e := c.listing(ctx, address)
+			if e != nil {
+				return nil, e
+			}
+			sort.Sort(sort.Reverse(sort.StringSlice(vs)))
+			for _, v := range vs {
+				vm := versionRE.FindStringSubmatch(v)
+				if vm == nil {
+					continue
+				}
+				files, e := c.listing(ctx, join(address, v))
+				if e != nil {
+					return nil, e
+				}
+				found := false
+				for _, f := range files {
+					m := fileRE.FindStringSubmatch(f)
+					if m == nil || m[1] != num || m[2] != vm[1] || m[3] != vm[2] || m[4] != vm[3] {
+						continue
+					}
+					a, _ := strconv.Atoi(m[2])
+					b, _ := strconv.Atoi(m[3])
+					z, _ := strconv.Atoi(m[4])
+					docs = append(docs, Document{ID: "ETSI EN " + num, Version: fmt.Sprintf("%d.%d.%d", a, b, z), URL: join(join(address, v), f)})
+					found = true
+					break
+				}
+				if found {
+					break
+				}
+			}
+		}
+	}
+	return docs, nil
+}
+
+// discoverGTS reads historical GSM publications, whose layout differs from TS/TR.
+func (c Client) discoverGTS(ctx context.Context, root string) ([]Document, error) {
+	groups, err := c.listing(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	var docs []Document
+	groupRE := regexp.MustCompile(`^[0-9]{2}/$`)
+	docRE := regexp.MustCompile(`^[0-9]{4,8}/$`)
+	fileRE := regexp.MustCompile(`(?i)^gsmts_([0-9]+)v([0-9]{2})([0-9]{2})([0-9]{2})p\.pdf$`)
+	for _, group := range groups {
+		if !groupRE.MatchString(group) {
+			continue
+		}
+		c.progress("Discovery: etsi_gts/%s", group)
+		specs, e := c.listing(ctx, join(root, group))
+		if e != nil {
+			return nil, e
+		}
+		for _, spec := range specs {
+			if !docRE.MatchString(spec) {
+				continue
+			}
+			sp := join(join(root, group), spec)
+			versions, e := c.listing(ctx, sp)
+			if e != nil {
+				return nil, e
+			}
+			sort.Sort(sort.Reverse(sort.StringSlice(versions)))
+			for _, v := range versions {
+				vm := versionRE.FindStringSubmatch(v)
+				if vm == nil {
+					continue
+				}
+				files, e := c.listing(ctx, join(sp, v))
+				if e != nil {
+					return nil, e
+				}
+				found := false
+				for _, f := range files {
+					m := fileRE.FindStringSubmatch(f)
+					if m == nil || m[1]+"/" != spec || m[2] != vm[1] || m[3] != vm[2] || m[4] != vm[3] {
+						continue
+					}
+					a, _ := strconv.Atoi(m[2])
+					b, _ := strconv.Atoi(m[3])
+					z, _ := strconv.Atoi(m[4])
+					number := m[1][:2] + "." + m[1][2:]
+					docs = append(docs, Document{ID: "GSM " + number, Version: fmt.Sprintf("%d.%d.%d", a, b, z), Series: m[1][:2], URL: join(join(sp, v), f)})
+					found = true
+					break
+				}
+				if found {
+					break
+				}
+			}
+		}
 	}
 	return docs, nil
 }
@@ -442,28 +572,26 @@ func (c Client) Import(ctx context.Context, d *db.DB, doc Document) error {
 		cover = cover[:i]
 	}
 	match := coverRE.FindStringSubmatch(cover)
-	if match == nil {
-		if coverDesignationRE.MatchString(cover) || len(strings.TrimSpace(cover)) < 50 {
-			return fmt.Errorf("%s: cannot reliably identify 3GPP publication from PDF cover", doc.URL)
+	if match == nil && len(strings.TrimSpace(cover)) < 50 {
+		return fmt.Errorf("%s: empty or unreadable PDF cover", doc.URL)
+	}
+	if match != nil {
+		// The 3GPP number on older ETSI covers differs from the ETSI number.
+		// ETSI's edition and the 3GPP version also need not be identical.
+		doc.ID = strings.ToUpper(match[1]) + " " + match[2]
+	} else if coverDesignationRE.MatchString(cover) {
+		return fmt.Errorf("%s: cannot reliably identify 3GPP publication from PDF cover", doc.URL)
+	} else if match := pdfRE.FindStringSubmatch(path.Base(doc.URL)); match != nil {
+		// The path names an ETSI document, not a dotted 3GPP number.
+		number := "1" + match[2][:5]
+		if len(match[2]) > 5 {
+			number += "-" + match[2][5:]
 		}
-		return fmt.Errorf("%s: %w", doc.URL, ErrNot3GPP)
+		doc.ID = "ETSI " + strings.ToUpper(match[1]) + " " + number
+	} else if !strings.HasPrefix(doc.ID, "ETSI ") && !strings.HasPrefix(doc.ID, "GSM ") {
+		doc.ID = "ETSI " + doc.ID
 	}
-	actual := strings.ToUpper(match[1]) + " " + match[2]
-	// A part number in a filename is zero padded; the cover carries its canonical spelling.
-	number := strings.ReplaceAll(strings.TrimPrefix(strings.TrimPrefix(actual, "TS "), "TR "), ".", "")
-	pieces := strings.SplitN(number, "-", 2)
-	if len(pieces) == 2 {
-		n, e := strconv.Atoi(pieces[1])
-		if e != nil {
-			return e
-		}
-		number = pieces[0] + fmt.Sprintf("%02d", n)
-	}
-	filename := pdfRE.FindStringSubmatch(path.Base(doc.URL))
-	if filename == nil || filename[2] != number || !strings.EqualFold(filename[1], match[1]) || match[3] != doc.Version {
-		return fmt.Errorf("%s: 3GPP cover %s version %s does not match discovered metadata", doc.URL, actual, match[3])
-	}
-	doc.ID = actual
+
 	spec, sections, err := ParseText(doc, text)
 	if err != nil {
 		return err

@@ -2,7 +2,6 @@ package etsi
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,9 +17,11 @@ import (
 
 func TestDiscoverLatestAndTypes(t *testing.T) {
 	pages := map[string]string{
-		"/etsi_ts/":                                  `<a href="123500_123599/">series</a><a href="999999_999999/">other</a>`,
-		"/etsi_ts/123500_123599/":                    `<a href="123501/">spec</a>`,
-		"/etsi_ts/123500_123599/123501/":             `<a href="17.01.00_60/">old</a><a href="18.02.00_60/">new</a>`,
+		"/etsi_en/":                      `<a href="ignored/">ignored</a>`,
+		"/etsi_gts/":                     `<a href="ignored/">ignored</a>`,
+		"/etsi_ts/":                      `<a href="123500_123599/">series</a><a href="999999_999999/">other</a>`,
+		"/etsi_ts/123500_123599/":        `<a href="123501/">spec</a>`,
+		"/etsi_ts/123500_123599/123501/": `<a href="17.01.00_60/">old</a><a href="18.02.00_60/">new</a>`,
 		"/etsi_ts/123500_123599/123501/18.02.00_60/": `<a href="ts_123501v180200p.pdf">pdf</a>`,
 		"/etsi_tr/":                                  `<a href="123800_123899/">series</a>`,
 		"/etsi_tr/123800_123899/":                    `<a href="123899/">spec</a>`,
@@ -119,14 +120,16 @@ func TestLivePDFImport(t *testing.T) {
 
 func TestDiscoverPartAndNewestRelease(t *testing.T) {
 	pages := map[string]string{
-		"/etsi_ts/":                                    `<a href="138100_138199/">group</a>`,
-		"/etsi_ts/138100_138199/":                      `<a href="13810101/">part</a>`,
-		"/etsi_ts/138100_138199/13810101/":             `<a href="18.20.00_60/">old</a><a href="19.06.00_60/">latest</a>`,
+		"/etsi_en/":                        `<a href="ignored/">ignored</a>`,
+		"/etsi_gts/":                       `<a href="ignored/">ignored</a>`,
+		"/etsi_ts/":                        `<a href="138100_138199/">group</a>`,
+		"/etsi_ts/138100_138199/":          `<a href="13810101/">part</a>`,
+		"/etsi_ts/138100_138199/13810101/": `<a href="18.20.00_60/">old</a><a href="19.06.00_60/">latest</a>`,
 		"/etsi_ts/138100_138199/13810101/19.06.00_60/": `<a href="ts_13810101v190600p.pdf">PDF</a>`,
-		"/etsi_tr/":                                    `<a href="123800_123899/">group</a>`,
-		"/etsi_tr/123800_123899/":                      `<a href="123899/">spec</a>`,
-		"/etsi_tr/123800_123899/123899/":               `<a href="19.00.00_60/">version</a>`,
-		"/etsi_tr/123800_123899/123899/19.00.00_60/":   `<a href="tr_123899v190000p.pdf">PDF</a>`,
+		"/etsi_tr/":                                  `<a href="123800_123899/">group</a>`,
+		"/etsi_tr/123800_123899/":                    `<a href="123899/">spec</a>`,
+		"/etsi_tr/123800_123899/123899/":             `<a href="19.00.00_60/">version</a>`,
+		"/etsi_tr/123800_123899/123899/19.00.00_60/": `<a href="tr_123899v190000p.pdf">PDF</a>`,
 	}
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, ok := pages[r.URL.Path]
@@ -301,17 +304,55 @@ Still part of charging.
 	}
 }
 
-func TestImportSkipsETSIDocumentMentioning3GPPRelease(t *testing.T) {
+func TestImportETSIDocumentMentioning3GPPRelease(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\nprintf 'ETSI Technical Specification Diameter Conformance testing for Gx interface (3GPP Release 10); Part 1: Conformance Statement\\n\\f'\n"
+	script := "#!/bin/sh\nprintf 'ETSI Technical Specification Diameter Conformance testing for Gx interface (3GPP Release 10); Part 1: Conformance Statement\\n\\f1 Scope\\nContent.\\n2 References\\nReferences.\\n'\n"
 	if err := os.WriteFile(filepath.Join(dir, "pdftotext"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "%PDF-1.7\ntest") }))
 	defer s.Close()
-	err := (Client{}).Import(context.Background(), nil, Document{ID: "TS 01.606-01", Version: "2.1.1", URL: s.URL + "/ts_10160601v020101p.pdf"})
-	if !errors.Is(err, ErrNot3GPP) {
-		t.Fatalf("want ErrNot3GPP, got %v", err)
+	d, err := db.OpenReadWrite(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if err = d.InitSchema(); err != nil {
+		t.Fatal(err)
+	}
+	err = (Client{}).Import(context.Background(), d, Document{ID: "TS 01.606-01", Version: "2.1.1", URL: s.URL + "/ts_10160601v020101p.pdf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs, err := d.ListSpecs(context.Background(), "", "", 10, 0)
+	if err != nil || len(specs.Specs) != 1 || specs.Specs[0].ID != "ETSI TS 101606-01" {
+		t.Fatalf("specs=%+v err=%v", specs, err)
+	}
+}
+
+func TestDiscoverGTSLatest(t *testing.T) {
+	pages := map[string]string{"/gts/": `<a href="03/">03</a>`, "/gts/03/": `<a href="0301/">0301</a>`, "/gts/03/0301/": `<a href="03.01.01_60/">old</a><a href="05.01.00_60/">new</a>`, "/gts/03/0301/05.01.00_60/": `<a href="gsmts_0301v050100p.pdf">pdf</a>`}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p, ok := pages[r.URL.Path]; ok {
+			fmt.Fprint(w, p)
+		} else {
+			http.NotFound(w, r)
+		}
+	}))
+	defer s.Close()
+	docs, err := (Client{}).discoverGTS(context.Background(), s.URL+"/gts/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 || docs[0].ID != "GSM 03.01" || docs[0].Version != "5.1.0" {
+		t.Fatalf("%+v", docs)
+	}
+}
+func TestOld3GPPCoverNumber(t *testing.T) {
+	text := "(3GPP TS 03.55 version 8.4.0 Release 1999)"
+	m := coverRE.FindStringSubmatch(text)
+	if m == nil || m[2] != "03.55" {
+		t.Fatalf("cover match %v", m)
 	}
 }
