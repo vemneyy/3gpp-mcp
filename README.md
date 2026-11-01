@@ -10,6 +10,21 @@ make build
 ./bin/3gpp-server --db data/etsi.db --transport http --addr :8080
 ```
 
+## RFC documents
+
+RFCs can be indexed alongside ETSI PDFs using the same host-side indexer. It reads the official RFC Editor XML catalogue and published text files, retaining one copy of each RFC. Stop the MCP server before changing its database:
+
+```sh
+docker compose down
+go build -o bin/3gpp-index ./cmd/3gpp-index
+./bin/3gpp-index --source rfc --db data/3gpp.db --workers 4 --resume
+docker compose up --build -d
+```
+
+To build both corpora in one run, use `--source all` (ETSI is indexed first; RFC indexing starts only after the ETSI stage succeeds). The default is `--source etsi`.
+
+The MCP server provides `search_rfc` for phrase search and `get_rfc` for the table of contents or a numbered section. RFC source text has varied formats, so extracted section boundaries may be incomplete. The importer does not determine RFC status, obsoleting RFCs, errata or updates; consult the RFC Editor for those. If any RFC fails, the command exits unsuccessfully and reports a partial index. The default source is `https://www.rfc-editor.org/`; `--rfc-base` selects a compatible RFC mirror.
+
 ## Docker Compose
 
 Build the indexer on the host and create the database there (requires Go 1.26+ and Poppler `pdftotext`):

@@ -20,5 +20,7 @@ func NewPDFServer(d *db.DB) *mcp.Server {
 	mcp.AddTool(s, SearchTool, HandleSearch(d))
 	mcp.AddTool(s, FindSectionsTool, HandleFindSections(d))
 	mcp.AddTool(s, GetReferencesTool, HandleGetReferences(d))
+	mcp.AddTool(s, RFCTool, HandleRFC(d))
+	mcp.AddTool(s, RFCSearchTool, HandleRFCSearch(d))
 	return s
 }

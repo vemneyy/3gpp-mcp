@@ -17,9 +17,12 @@ import (
 	"github.com/higebu/3gpp-mcp/internal/asn1index"
 	"github.com/higebu/3gpp-mcp/internal/db"
 	"github.com/higebu/3gpp-mcp/internal/etsi"
+	"github.com/higebu/3gpp-mcp/internal/rfc"
 )
 
 func main() {
+	source := flag.String("source", "etsi", "Source to index: etsi, rfc or all")
+	rfcBase := flag.String("rfc-base", rfc.DefaultBase, "RFC Editor base URL")
 	database := flag.String("db", "3gpp.db", "SQLite database path")
 	base := flag.String("base", etsi.DefaultBase, "ETSI deliver directory URL")
 	resume := flag.Bool("resume", false, "Resume an incomplete database and update changed versions")
@@ -27,6 +30,15 @@ func main() {
 	flag.Parse()
 	if *workers < 1 {
 		log.Fatal("workers must be positive")
+	}
+	if *source != "etsi" && *source != "rfc" && *source != "all" {
+		log.Fatal("source must be etsi, rfc or all")
+	}
+	if *source == "rfc" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		runRFC(ctx, database, rfcBase, workers, resume)
+		return
 	}
 	if _, err := os.Stat(*database); err == nil && !*resume {
 		log.Fatal("database already exists; use --resume or choose a new path")
@@ -160,4 +172,10 @@ sendJobs:
 		log.Fatalf("finalize database: %v", err)
 	}
 	log.Printf("Indexed %d specifications; skipped %d non-3GPP ETSI publications", indexed, skipped)
+	if *source == "all" {
+		if err := d.Close(); err != nil {
+			log.Fatal(err)
+		}
+		runRFC(ctx, database, rfcBase, workers, resume)
+	}
 }
