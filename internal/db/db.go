@@ -29,9 +29,12 @@ type Spec struct {
 	// VersionToken is the base-36 form used in archive filenames, e.g. "k20".
 	// It is kept alongside Version so an archive file stays resolvable even
 	// though the dotted form is what users and documents refer to.
-	VersionToken string `json:"version_token,omitempty"`
-	Release      string `json:"release,omitempty"`
-	Series       string `json:"series,omitempty"`
+	VersionToken string   `json:"version_token,omitempty"`
+	Release      string   `json:"release,omitempty"`
+	Series       string   `json:"series,omitempty"`
+	Area         string   `json:"area,omitempty"`
+	PDFMetadata  bool     `json:"-"`
+	Generations  []string `json:"generations,omitempty"`
 }
 
 type Section struct {
@@ -131,6 +134,26 @@ func OpenReadWrite(path string) (*DB, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 	return &DB{conn: conn}, nil
+}
+
+// FinalizeForReadOnly checkpoints the WAL and converts the database to a
+// standalone file that can be opened from a read-only mount.
+func (d *DB) FinalizeForReadOnly() error {
+	var busy, total, checkpointed int
+	if err := d.conn.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &total, &checkpointed); err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
+	}
+	if busy != 0 {
+		return fmt.Errorf("checkpoint blocked by another connection")
+	}
+	var mode string
+	if err := d.conn.QueryRow("PRAGMA journal_mode=DELETE").Scan(&mode); err != nil {
+		return fmt.Errorf("set journal mode: %w", err)
+	}
+	if !strings.EqualFold(mode, "delete") {
+		return fmt.Errorf("journal mode is %q, expected delete", mode)
+	}
+	return nil
 }
 
 // Exec executes a SQL statement on the database. Intended for testing.
@@ -244,6 +267,16 @@ CREATE INDEX IF NOT EXISTS idx_images_spec ON images(spec_id, version);
 // porter leaves untouched. The DDL is IF NOT EXISTS, so the tokenizer applies
 // to newly created databases only.
 const Schema = SpecTablesSchema + ImagesTableSchema + `
+CREATE TABLE IF NOT EXISTS spec_metadata (
+    spec_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    area TEXT NOT NULL DEFAULT '',
+    generations TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (spec_id, version)
+);
+CREATE TRIGGER IF NOT EXISTS specs_metadata_delete AFTER DELETE ON specs BEGIN
+    DELETE FROM spec_metadata WHERE spec_id = old.id AND version = old.version;
+END;
 
 -- Porter wraps unicode61 and passes the remaining arguments through to it.
 -- tokenchars '-' keeps hyphenated ASN.1 identifiers (RRCSetup-IEs) as single
@@ -362,6 +395,13 @@ END;
 func (d *DB) InitSchema() error {
 	_, err := d.conn.Exec(Schema)
 	return err
+}
+
+// HasPDFMetadata reports whether a PDF spec was imported by the metadata-aware indexer.
+func (d *DB) HasPDFMetadata(ctx context.Context, id, version string) (bool, error) {
+	var exists int
+	err := d.conn.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM spec_metadata WHERE spec_id=? AND version=?)", id, version).Scan(&exists)
+	return exists != 0, err
 }
 
 // ResolveVersion returns the version of a spec to read. An empty version means
@@ -580,6 +620,20 @@ func (d *DB) InsertSpecWithSections(spec Spec, sections []Section) error {
 
 // InsertSpecWithSectionsAndImages inserts a spec, sections, and images in a transaction.
 func (d *DB) InsertSpecWithSectionsAndImages(spec Spec, sections []Section, images []Image) error {
+	// Extract references before acquiring SQLite's single writer: concurrent
+	// PDF workers can perform the CPU-bound scan in parallel.
+	var bracketMap map[string]string
+	for _, s := range sections {
+		if s.Number == "2" || strings.EqualFold(s.Title, "References") ||
+			strings.EqualFold(s.Title, "Normative references") || strings.EqualFold(s.Title, "Informative references") {
+			bracketMap = ParseBracketedRefMap(s.Content)
+			break
+		}
+	}
+	sectionRefs := make([][]Reference, len(sections))
+	for i, s := range sections {
+		sectionRefs[i] = ExtractReferences(s.SpecID, s.Number, s.Content, bracketMap)
+	}
 	tx, err := d.conn.Begin()
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -592,6 +646,14 @@ func (d *DB) InsertSpecWithSectionsAndImages(spec Spec, sections []Section, imag
 	)
 	if err != nil {
 		return fmt.Errorf("upsert spec: %w", err)
+	}
+	if spec.PDFMetadata || spec.Area != "" || len(spec.Generations) > 0 {
+		if _, err = tx.Exec("DELETE FROM spec_metadata WHERE spec_id = ?", spec.ID); err != nil {
+			return fmt.Errorf("delete old spec metadata: %w", err)
+		}
+		if _, err = tx.Exec("INSERT INTO spec_metadata (spec_id, version, area, generations) VALUES (?, ?, ?, ?)", spec.ID, spec.Version, spec.Area, strings.Join(spec.Generations, ",")); err != nil {
+			return fmt.Errorf("insert spec metadata: %w", err)
+		}
 	}
 
 	// Use explicit DELETE + INSERT to ensure FTS5 triggers fire correctly.
@@ -635,17 +697,6 @@ func (d *DB) InsertSpecWithSectionsAndImages(spec Spec, sections []Section, imag
 		return fmt.Errorf("prepare ref delete: %w", err)
 	}
 	defer delRefStmt.Close()
-
-	// Build bracketed reference map from the References section.
-	var bracketMap map[string]string
-	for _, s := range sections {
-		if s.Number == "2" || strings.EqualFold(s.Title, "References") ||
-			strings.EqualFold(s.Title, "Normative references") ||
-			strings.EqualFold(s.Title, "Informative references") {
-			bracketMap = ParseBracketedRefMap(s.Content)
-			break
-		}
-	}
 
 	// A build imports one version per spec, and search depends on that: the FTS
 	// index has no version column, so a second version of the same spec would
@@ -694,7 +745,7 @@ func (d *DB) InsertSpecWithSectionsAndImages(spec Spec, sections []Section, imag
 
 	// The spec row is the authority on the version, so child rows take it from
 	// there rather than from their own field.
-	for _, s := range sections {
+	for i, s := range sections {
 		if _, err = delStmt.Exec(s.SpecID, spec.Version, s.Number); err != nil {
 			return fmt.Errorf("delete section: %w", err)
 		}
@@ -707,8 +758,7 @@ func (d *DB) InsertSpecWithSectionsAndImages(spec Spec, sections []Section, imag
 			return fmt.Errorf("delete stale references: %w", err)
 		}
 
-		refs := ExtractReferences(s.SpecID, s.Number, s.Content, bracketMap)
-		for _, r := range refs {
+		for _, r := range sectionRefs[i] {
 			_, err = refStmt.Exec(r.SourceSpecID, spec.Version, r.SourceSection, r.TargetSpec, r.TargetSection, r.Context)
 			if err != nil {
 				return fmt.Errorf("insert reference: %w", err)
@@ -769,7 +819,18 @@ func (d *DB) ListSpecs(ctx context.Context, series, query string, limit, offset 
 		return nil, fmt.Errorf("count specs: %w", err)
 	}
 
-	sqlQuery := "SELECT id, version, COALESCE(version_token, ''), title, COALESCE(release, ''), COALESCE(series, '') FROM specs" + where + " ORDER BY id, version"
+	// Databases built before PDF metadata was introduced remain readable.
+	var hasMetadata int
+	if err := d.conn.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='spec_metadata'").Scan(&hasMetadata); err != nil {
+		return nil, fmt.Errorf("check spec metadata: %w", err)
+	}
+	projection := "SELECT id, version, COALESCE(version_token, ''), title, COALESCE(release, ''), COALESCE(series, '')"
+	if hasMetadata != 0 {
+		projection += ", COALESCE((SELECT area FROM spec_metadata m WHERE m.spec_id=specs.id AND m.version=specs.version), ''), COALESCE((SELECT generations FROM spec_metadata m WHERE m.spec_id=specs.id AND m.version=specs.version), '')"
+	} else {
+		projection += ", '', ''"
+	}
+	sqlQuery := projection + " FROM specs" + where + " ORDER BY id, version"
 	args := append([]any{}, filterArgs...)
 
 	// limit == 0: use default; limit < 0: no limit (return all rows, internal use only).
@@ -793,8 +854,12 @@ func (d *DB) ListSpecs(ctx context.Context, series, query string, limit, offset 
 	var specs []Spec
 	for rows.Next() {
 		var s Spec
-		if err := rows.Scan(&s.ID, &s.Version, &s.VersionToken, &s.Title, &s.Release, &s.Series); err != nil {
+		var generations string
+		if err := rows.Scan(&s.ID, &s.Version, &s.VersionToken, &s.Title, &s.Release, &s.Series, &s.Area, &generations); err != nil {
 			return nil, fmt.Errorf("scan spec: %w", err)
+		}
+		if generations != "" {
+			s.Generations = strings.Split(generations, ",")
 		}
 		specs = append(specs, s)
 	}
@@ -1907,6 +1972,13 @@ func ExtractReferences(sourceSpecID, sectionNumber, content string, bracketMap m
 	seen := make(map[string]bool)
 	var refs []Reference
 
+	// Every 3GPP designation contains an uppercase TS or TR. Avoid running
+	// expensive section-list expressions over prose that cannot match them.
+	hasSpec := strings.Contains(content, "TS") || strings.Contains(content, "TR")
+	hasSection := strings.Contains(content, "clause") || strings.Contains(content, "Clause") ||
+		strings.Contains(content, "section") || strings.Contains(content, "Section") ||
+		strings.Contains(content, "annex") || strings.Contains(content, "Annex")
+
 	// Multi-section patterns (produce multiple references per match).
 	multiPatterns := []struct {
 		re      *regexp.Regexp
@@ -1917,6 +1989,9 @@ func ExtractReferences(sourceSpecID, sectionNumber, content string, bracketMap m
 		{tsMultiRefRE, tsMultiSpecSections},
 	}
 	for _, pat := range multiPatterns {
+		if !hasSpec || !hasSection || (!strings.Contains(content, "and") && !strings.Contains(content, "or") && !strings.Contains(content, ",")) {
+			break
+		}
 		for _, m := range pat.re.FindAllStringSubmatchIndex(content, -1) {
 			spec, sections, ok := pat.extract(m, content)
 			if !ok || spec == sourceSpecID {
@@ -1957,6 +2032,24 @@ func ExtractReferences(sourceSpecID, sectionNumber, content string, bracketMap m
 	}
 
 	for _, pat := range patterns {
+		switch pat.re {
+		case tsPrefixRefRE:
+			if !hasSpec || !hasSection {
+				continue
+			}
+		case tsRefRE:
+			if !hasSpec {
+				continue
+			}
+		case rfcRefRE:
+			if !strings.Contains(content, "RFC") {
+				continue
+			}
+		case bracketRefRE:
+			if !hasSection || !strings.Contains(content, "[") {
+				continue
+			}
+		}
 		for _, m := range pat.re.FindAllStringSubmatchIndex(content, -1) {
 			targetSpec, targetSection, ok := pat.extract(m, content)
 			if !ok || targetSpec == sourceSpecID {

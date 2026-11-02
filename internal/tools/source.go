@@ -19,6 +19,8 @@ import (
 // the on-demand version cache for versions the build did not import.
 type Source struct {
 	DB *db.DB
+	// DatabaseOnly disables upstream archive access for PDF-only servers.
+	DatabaseOnly bool
 	// Store is nil when on-demand fetching is unavailable, either because the
 	// cache file could not be opened or because it was turned off explicitly.
 	Store *versionstore.Store

@@ -21,6 +21,8 @@ max_release_flag = $(if $(MAX_RELEASE),--max-release $(MAX_RELEASE))
 # Build the MCP server
 build:
 	mkdir -p "$(BIN_DIR)"
+	go build -o $(BIN_DIR)/3gpp-index ./cmd/3gpp-index
+	go build -o $(BIN_DIR)/3gpp-server ./cmd/3gpp-server
 	go build -o $(BIN_DIR)/3gpp-mcp ./cmd/3gpp-mcp
 
 # Install the MCP server
@@ -40,7 +42,7 @@ import-dir: build
 # every spec by default; pass RELEASE=19 to restrict to a single release, or
 # MAX_RELEASE=19 to cap the newest release without dropping specs.
 build-db: build
-	./$(BIN_DIR)/3gpp-mcp build $(release_flag) $(max_release_flag) --db $(DB_PATH) --convert-doc
+	./$(BIN_DIR)/3gpp-index --db $(DB_PATH)
 
 # Download specs (no database import; legacy .doc files are converted to
 # .docx). Latest of every spec by default; pass RELEASE=19 to restrict to a
