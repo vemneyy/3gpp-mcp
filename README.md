@@ -1,3 +1,11 @@
+# Indexer patch 0.2.1
+
+Fixes legacy GSM PDFs with `0`, `0.1`, or `1.1 Scope`, preserves their parent
+clauses, recognizes GSM cover designations, and replaces old ETSI source aliases
+after successful import. Verified against all 25 PDFs from the reported failure
+log. Update only the host indexer; the existing Docker MCP image remains compatible.
+See [update commands](docs/UPDATING.md) and [Linux binaries](https://github.com/vemneyy/3gpp-mcp/tree/binaries-0.2.1).
+
 # Version 0.2.0: host indexer and Docker MCP
 
 Use `make build-indexer` for the standalone Linux indexer and `docker compose up --build -d` for the server. See [обновление локального сервера](docs/UPDATING.md) for the host-indexer/Docker workflow. Both executables support `--version`. Binary downloads are published separately in the [`binaries-0.2.0`](https://github.com/vemneyy/3gpp-mcp/tree/binaries-0.2.0) distribution branch.

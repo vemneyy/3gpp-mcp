@@ -32,6 +32,18 @@ var pdfRE = regexp.MustCompile(`(?i)^(ts|tr)_1([0-9]{5}(?:[0-9]{2})?)v([0-9]{2})
 var headingRE = regexp.MustCompile(`^\s*((?:[0-9]+[A-Za-z]?(?:\.[0-9]+[A-Za-z]?)*|[A-Z](?:\.[0-9]+[A-Za-z]?)+))\s+([^\n]{2,180}?)\s*$`)
 var coverRE = regexp.MustCompile(`(?i)3GPP\s+(TS|TR)\s+([0-9]{2}\.[0-9]{2,3}(?:-[0-9]+)?)\s+version\s+([0-9]+\.[0-9]+\.[0-9]+)`)
 
+var gsmCoverRE = regexp.MustCompile(`(?i)\bGSM\s+([0-9]{2}\.[0-9]{2,3}(?:-[0-9]+)?)\s+version\s+([0-9]+\.[0-9]+\.[0-9]+)`)
+
+func coverID(cover string) string {
+	if m := coverRE.FindStringSubmatch(cover); m != nil {
+		return strings.ToUpper(m[1]) + " " + m[2]
+	}
+	if m := gsmCoverRE.FindStringSubmatch(cover); m != nil {
+		return "GSM " + m[1]
+	}
+	return ""
+}
+
 // ErrNot3GPP marks an ETSI publication whose cover does not identify it as a 3GPP specification.
 var ErrNot3GPP = errors.New("ETSI PDF is not identified as a 3GPP specification")
 
@@ -44,15 +56,19 @@ var generationRE = regexp.MustCompile(`(?i)\b(GSM|UMTS|LTE|2G|3G|4G|5G|6G)\b`)
 // subject area and title. Only explicitly named generations are tagged.
 func coverMetadata(text, fallback string) (string, string, []string) {
 	cover, _, _ := strings.Cut(text, "\f")
-	if match := coverRE.FindStringIndex(cover); match != nil {
-		cover = cover[:match[0]]
+	cut := len(cover)
+	for _, pattern := range []*regexp.Regexp{coverRE, gsmCoverRE} {
+		if match := pattern.FindStringIndex(cover); match != nil && match[0] < cut {
+			cut = match[0]
+		}
 	}
+	cover = cover[:cut]
 	lines := strings.Split(cover, "\n")
 	var parts []string
 	started := false
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "TECHNICAL SPECIFICATION") || strings.HasPrefix(line, "TECHNICAL REPORT") {
+		if strings.EqualFold(line, "Technical Specification") || strings.EqualFold(line, "Technical Report") {
 			started = true
 			continue
 		}
@@ -367,19 +383,54 @@ func headingMatch(line string) []string {
 	return headingRE.FindStringSubmatch(line)
 }
 
-// ParseText splits pdftotext output into numbered clauses. The table of
-// contents is skipped using the last Scope heading before clause 2.
-func ParseText(doc Document, text string) (db.Spec, []db.Section, error) {
-	lines := strings.Split(strings.ReplaceAll(text, "\f", "\n"), "\n")
-	start := -1
-	for i, l := range lines {
-		m := headingMatch(l)
-		if m != nil && m[1] == "1" && strings.EqualFold(strings.TrimSpace(m[2]), "Scope") {
-			start = i
-		} else if start >= 0 && m != nil && m[1] == "2" {
-			break
+// bodyStart skips TOC rows and accepts the Scope numbering used by older
+// GSM specifications. A bare TOC heading followed by another heading is not
+// treated as body text. Parent headings are located before the chosen clause.
+func bodyStart(lines []string) int {
+	for i, line := range lines {
+		m := headingMatch(line)
+		if m == nil || !strings.EqualFold(m[2], "Scope") || tocLineRE.MatchString(line) {
+			continue
 		}
+		next := i + 1
+		for next < len(lines) && strings.TrimSpace(lines[next]) == "" {
+			next++
+		}
+		if next < len(lines) && headingMatch(lines[next]) != nil {
+			continue
+		}
+		start := i
+		parent := m[1]
+		for {
+			dot := strings.LastIndex(parent, ".")
+			if dot < 0 {
+				break
+			}
+			parent = parent[:dot]
+			for j := start - 1; j >= 0; j-- {
+				h := headingMatch(lines[j])
+				if h != nil && h[1] == parent && !tocLineRE.MatchString(lines[j]) && !strings.Contains(h[2], "...") {
+					start = j
+					break
+				}
+			}
+		}
+		return start
 	}
+	return -1
+}
+
+// ParseText preserves legacy GSM clause numbering, including 0, 0.1 and
+// 1.1 Scope. A numbered parent preceding Scope remains part of the document.
+func ParseText(doc Document, text string) (db.Spec, []db.Section, error) {
+	cover, _, _ := strings.Cut(text, "\f")
+	if id := coverID(cover); id != "" {
+		doc.ID = id
+		_, number, _ := strings.Cut(id, " ")
+		doc.Series = number[:2]
+	}
+	lines := strings.Split(strings.ReplaceAll(text, "\f", "\n"), "\n")
+	start := bodyStart(lines)
 	if start < 0 {
 		return db.Spec{}, nil, fmt.Errorf("%s: cannot find Scope heading in extracted PDF text", doc.ID)
 	}
@@ -435,6 +486,18 @@ func ParseText(doc Document, text string) (db.Spec, []db.Section, error) {
 	major, _, _ := strings.Cut(doc.Version, ".")
 	title, area, generations := coverMetadata(text, doc.ID)
 	return db.Spec{ID: doc.ID, Title: title, Area: area, Generations: generations, PDFMetadata: true, Version: doc.Version, Release: major, Series: doc.Series}, sections, nil
+}
+
+func etsiPDFID(address string) string {
+	match := pdfRE.FindStringSubmatch(path.Base(address))
+	if match == nil {
+		return ""
+	}
+	number := "1" + match[2][:5]
+	if len(match[2]) > 5 {
+		number += "-" + match[2][5:]
+	}
+	return "ETSI " + strings.ToUpper(match[1]) + " " + number
 }
 
 // Import downloads one PDF to a temporary file and extracts text with Poppler.
@@ -499,23 +562,19 @@ func (c Client) Import(ctx context.Context, d *db.DB, doc Document) error {
 	if i := strings.IndexByte(cover, '\f'); i >= 0 {
 		cover = cover[:i]
 	}
-	match := coverRE.FindStringSubmatch(cover)
-	if match == nil && len(strings.TrimSpace(cover)) < 50 {
+	id := coverID(cover)
+	legacyID := etsiPDFID(doc.URL)
+	if id == "" && len(strings.TrimSpace(cover)) < 50 {
 		return fmt.Errorf("%s: empty or unreadable PDF cover", doc.URL)
 	}
-	if match != nil {
+	if id != "" {
 		// The 3GPP number on older ETSI covers differs from the ETSI number.
 		// ETSI's edition and the 3GPP version also need not be identical.
-		doc.ID = strings.ToUpper(match[1]) + " " + match[2]
+		doc.ID = id
 	} else if coverDesignationRE.MatchString(cover) {
 		return fmt.Errorf("%s: cannot reliably identify 3GPP publication from PDF cover", doc.URL)
-	} else if match := pdfRE.FindStringSubmatch(path.Base(doc.URL)); match != nil {
-		// The path names an ETSI document, not a dotted 3GPP number.
-		number := "1" + match[2][:5]
-		if len(match[2]) > 5 {
-			number += "-" + match[2][5:]
-		}
-		doc.ID = "ETSI " + strings.ToUpper(match[1]) + " " + number
+	} else if legacyID != "" {
+		doc.ID = legacyID
 	} else if !strings.HasPrefix(doc.ID, "ETSI ") && !strings.HasPrefix(doc.ID, "GSM ") {
 		doc.ID = "ETSI " + doc.ID
 	}
@@ -525,5 +584,15 @@ func (c Client) Import(ctx context.Context, d *db.DB, doc Document) error {
 		return err
 	}
 	c.progress("%s v%s: indexing %d sections in SQLite", doc.ID, doc.Version, len(sections))
-	return d.InsertSpecWithSections(spec, sections)
+	if err := d.InsertSpecWithSections(spec, sections); err != nil {
+		return err
+	}
+	// Old indexers stored GSM covers under the ETSI publication ID. Remove
+	// only that exact source alias after its canonical replacement is committed.
+	if legacyID != "" && legacyID != spec.ID {
+		if err := d.DeleteSpec(legacyID); err != nil {
+			return fmt.Errorf("remove legacy alias %s: %w", legacyID, err)
+		}
+	}
+	return nil
 }

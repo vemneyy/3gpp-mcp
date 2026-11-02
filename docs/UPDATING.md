@@ -1,3 +1,42 @@
+# Исправление 0.2.1: обновить только индексатор
+
+Версия 0.2.1 исправляет старые GSM PDF с `0 Scope`, `0.1 Scope`, `1.1 Scope`,
+сохраняет родительские разделы и распознаёт обозначения GSM на обложке.
+При повторном импорте старая запись под ETSI-обозначением заменяется канонической.
+Схема БД и MCP-протокол не менялись. Docker-образ пересобирать не требуется.
+
+Если старый индексатор ещё работает, остановите его через Ctrl+C и дождитесь выхода.
+Для сервера из примера (`/opt/3gpp-mcp`, Linux amd64):
+
+```bash
+cd /opt/3gpp-mcp
+mkdir -p bin
+curl -fL https://github.com/vemneyy/3gpp-mcp/raw/refs/heads/binaries-0.2.1/3gpp-index_0.2.1_linux_amd64 -o bin/3gpp-index_0.2.1_linux_amd64
+curl -fL https://github.com/vemneyy/3gpp-mcp/raw/refs/heads/binaries-0.2.1/SHA256SUMS -o bin/SHA256SUMS-0.2.1
+(cd bin && sha256sum --ignore-missing -c SHA256SUMS-0.2.1)
+chmod +x bin/3gpp-index_0.2.1_linux_amd64
+bin/3gpp-index_0.2.1_linux_amd64 --version
+mv bin/3gpp-index_0.2.1_linux_amd64 bin/3gpp-index
+```
+
+Ожидается `3gpp-index 0.2.1`. Для ARM64 замените `linux_amd64` на `linux_arm64`.
+Не заменяйте установленный бинарник, если скачивание или проверка суммы не удались.
+Далее остановите существующий MCP-контейнер и продолжите индексирование:
+
+```bash
+docker stop 3gpp-mcp-mcp-1
+./bin/3gpp-index --source all --db data/3gpp.db --resume --workers 8 --scrape-workers 8 && docker start 3gpp-mcp-mcp-1
+```
+
+Контейнер запустится только после успешной индексации; его образ, параметры
+и порт 18080 сохранятся. Имеющуюся базу удалять не требуется. Исправление
+проверено на всех 25 PDF из предоставленного лога, включая запись секций в SQLite.
+Новые ошибки других документов требуют отдельного разбора.
+
+Для обновления исходников отдельно: `git pull --ff-only origin work`.
+
+---
+
 # Обновление до 0.2.0: индексатор на хосте, MCP в Docker
 
 `3gpp-index` запускается на сервере и создаёт SQLite-базу из ETSI/GSM и RFC.
