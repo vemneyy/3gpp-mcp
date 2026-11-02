@@ -1,3 +1,7 @@
+# Version 0.2.0: host indexer and Docker MCP
+
+Use `make build-indexer` for the standalone Linux indexer and `docker compose up --build -d` for the server. See [обновление локального сервера](docs/UPDATING.md) for the host-indexer/Docker workflow. Both executables support `--version`. Binary release assets are published separately from source code.
+
 # ETSI PDF indexing and MCP server
 
 The recommended pipeline has two independent programs. `3gpp-index` discovers candidate Technical Specifications and Technical Reports under ETSI's `deliver/etsi_ts` and `deliver/etsi_tr` directories, downloads the newest published PDF for each candidate, verifies the 3GPP identifier on the cover and extracts its text with Poppler `pdftotext`, and stores clauses in SQLite with FTS5. `3gpp-server` opens that database read-only and serves MCP via stdio or HTTP. Go 1.26+ and Poppler (`pdftotext`) are required on the indexing machine.
@@ -23,7 +27,7 @@ docker compose up --build -d
 
 To build both corpora in one run, use `--source all` (ETSI is indexed first; RFC indexing starts only after the ETSI stage succeeds). The default is `--source etsi`.
 
-The MCP server provides `search_rfc` for phrase search and `get_rfc` for the table of contents or a numbered section. RFC source text has varied formats, so extracted section boundaries may be incomplete. The importer does not determine RFC status, obsoleting RFCs, errata or updates; consult the RFC Editor for those. If any RFC fails, the command exits unsuccessfully and reports a partial index. The default source is `https://www.rfc-editor.org/`; `--rfc-base` selects a compatible RFC mirror.
+Use `search_all` to search RFCs and specifications together. The MCP server also provides `search_rfc` for scoped phrase search and `get_rfc` for the table of contents or a numbered section. RFC source text has varied formats, so extracted section boundaries may be incomplete. The importer does not determine RFC status, obsoleting RFCs, errata or updates; consult the RFC Editor for those. If any RFC fails, the command exits unsuccessfully and reports a partial index. The default source is `https://www.rfc-editor.org/`; `--rfc-base` selects a compatible RFC mirror.
 
 ## Docker Compose
 
@@ -36,13 +40,13 @@ go build -o bin/3gpp-index ./cmd/3gpp-index
 docker compose up --build -d
 ```
 
-The container runs only the MCP server. Compose mounts `./data` read-only at `/data`; the server reads `/data/3gpp.db` and listens at `http://127.0.0.1:8080/`. Configure the host directory with `MCP_DATA_DIR`, or the bind address and port with `MCP_BIND_ADDRESS` and `MCP_PORT`. The container's non-root user must be able to traverse the directory and read the database. Publishing on a non-loopback address exposes an unauthenticated MCP endpoint.
+The container runs only the MCP server, includes `tshark` for offline capture analysis, and uses an ephemeral `/tmp` mount. Set `THREEGPP_MCP_BEARER_TOKEN` to protect MCP and binary uploads with a bearer token. Compose mounts `./data` read-only at `/data`; the server reads `/data/3gpp.db` and listens at `http://127.0.0.1:8080/`. Configure the host directory with `MCP_DATA_DIR`, or the bind address and port with `MCP_BIND_ADDRESS` and `MCP_PORT`. The container's non-root user must be able to traverse the directory and read the database. Publishing on a non-loopback address exposes an unauthenticated MCP endpoint.
 
 After a successful index build, the indexer checkpoints SQLite and switches it out of WAL mode for read-only use. Stop the container before updating the database with `--resume`, and restart it after the update finishes. Do not serve a partial database after an unsuccessful indexing run.
 
 The indexer uses a Chrome uTLS ClientHello for HTTPS, respects HTTPS_PROXY and NO_PROXY, and verifies certificates. HTTP/2 is used when available; HTTP/1.1 is used as a fallback.
 
-The initial crawl and full download can take a long time. The indexer exits with an error if a directory or PDF fails; the database is then partial. Run the same command with `--resume` to retry missing documents and update changed versions. Existing indexed versions are skipped. Discovery itself must succeed before the database is changed. `--base` can point to an ETSI-compatible mirror or a test server. The ETSI site must allow directory listings and PDF downloads. ETSI may return HTTP 403 for some directories or individual PDFs; in that case the indexer exits with an error rather than reporting a complete database. The source catalog must be accessible to establish which version is newest.
+The initial crawl and full download can take a long time. The indexer exits with an error if a directory or PDF fails; the database is then partial. Run the same command with `--resume` to retry missing documents and update changed versions. Existing indexed versions are skipped. Discovery and downloads run concurrently in bounded worker pools (`--scrape-workers` and `--workers`). A failed listing exits with an error; the database may contain completed imports and can be resumed. `--base` can point to an ETSI-compatible mirror or a test server. The ETSI site must allow directory listings and PDF downloads. ETSI may return HTTP 403 for some directories or individual PDFs; in that case the indexer exits with an error rather than reporting a complete database. The source catalog must be accessible to establish which version is newest.
 
 The database holds one latest version per specification. PDF extraction preserves plain text and approximates clause boundaries; tables, formulas, figures and headings can differ from the original PDF. The PDF server provides `list_specs`, `list_versions`, `get_toc`, `get_section`, `search` and `get_references`; it does not fetch historical versions, meeting documents, images, or separate OpenAPI files. The older combined CLI and DOCX/FTP pipeline remain available for compatibility; the legacy documentation below describes those commands and capabilities, not the PDF server.
 
@@ -630,8 +634,7 @@ in the result list so clause matches cannot bury all API matches. A missing
 OpenAPI index produces a warning while clause results remain available.
 Use terms, quoted phrases and boolean operators common to both indexes;
 column filters such as `title:` or `body:` belong to the specialized tools.
-Archived versions and TDocs are outside this search corpus. RFCs referenced
-in clauses are searchable as text; this repository does not index RFC bodies.
+Archived versions and TDocs are outside this search corpus. RFC bodies indexed by `3gpp-index --source rfc` or `--source all` are included in the same clause search alongside ETSI, 3GPP and GSM documents.
 
 ```bash
 3gpp-mcp search-all --db data/3gpp.db 'NFProfile OR authentication'

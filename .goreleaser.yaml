@@ -8,7 +8,9 @@ before:
     - go mod tidy
 
 builds:
-  - main: ./cmd/3gpp-mcp
+  - id: mcp
+    binary: 3gpp-mcp
+    main: ./cmd/3gpp-mcp
     ldflags:
       - -s -w -X main.version={{ .Version }}
     env:
@@ -21,6 +23,23 @@ builds:
       - arm64
       - amd64
       - "386"
+
+  - id: indexer
+    binary: 3gpp-index
+    main: ./cmd/3gpp-index
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    env: [CGO_ENABLED=0]
+    goos: [linux, windows, darwin]
+    goarch: [amd64, arm64]
+  - id: server
+    binary: 3gpp-server
+    main: ./cmd/3gpp-server
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    env: [CGO_ENABLED=0]
+    goos: [linux, windows, darwin]
+    goarch: [amd64, arm64]
 
 archives:
   - formats: [tar.gz]

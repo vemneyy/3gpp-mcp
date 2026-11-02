@@ -1,4 +1,4 @@
-.PHONY: build install import import-dir build-db download-specs download-latest-specs update-specs db-info test e2e clean web
+.PHONY: build build-indexer install import import-dir build-db download-specs download-latest-specs update-specs db-info test e2e clean web
 
 SPECS_DIR ?= specs
 DB_PATH ?= data/3gpp.db
@@ -23,6 +23,11 @@ build:
 	mkdir -p "$(BIN_DIR)"
 	go build -o $(BIN_DIR)/3gpp-index ./cmd/3gpp-index
 	go build -o $(BIN_DIR)/3gpp-server ./cmd/3gpp-server
+	go build -o $(BIN_DIR)/3gpp-mcp ./cmd/3gpp-mcp
+
+build-indexer:
+	mkdir -p "$(BIN_DIR)"
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN_DIR)/3gpp-index ./cmd/3gpp-index
 	go build -o $(BIN_DIR)/3gpp-mcp ./cmd/3gpp-mcp
 
 # Install the MCP server

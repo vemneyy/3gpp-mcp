@@ -219,94 +219,22 @@ func join(base, elem string) string { return strings.TrimRight(base, "/") + "/" 
 // the latest published version per specification. Any failed listing fails the
 // run, so an incomplete catalogue cannot silently look complete.
 func (c Client) Discover(ctx context.Context) ([]Document, error) {
-	base := c.Base
-	if base == "" {
-		base = DefaultBase
-	}
 	var docs []Document
-	for _, kind := range []string{"etsi_ts/", "etsi_tr/"} {
-		root := join(base, kind)
-		c.progress("Discovery: reading %s", root)
-		groups, err := c.listing(ctx, root)
-		if err != nil {
-			return nil, err
-		}
-		count := 0
-		for _, group := range groups {
-			if !groupRE.MatchString(group) {
-				continue
-			}
-			count++
-			gp := join(root, group)
-			c.progress("Discovery: %s%s; PDF candidates found: %d", kind, group, len(docs))
-			specs, e := c.listing(ctx, gp)
-			if e != nil {
-				return nil, e
-			}
-			for _, spec := range specs {
-				if !specRE.MatchString(spec) {
-					continue
-				}
-				sp := join(gp, spec)
-				c.progress("Discovery: checking %s%s%s", kind, group, spec)
-				versions, e := c.listing(ctx, sp)
-				if e != nil {
-					return nil, e
-				}
-				sort.Sort(sort.Reverse(sort.StringSlice(versions)))
-				for _, v := range versions {
-					if !versionRE.MatchString(v) {
-						continue
-					}
-					vp := join(sp, v)
-					files, e := c.listing(ctx, vp)
-					if e != nil {
-						return nil, e
-					}
-					found := false
-					for _, f := range files {
-						m := pdfRE.FindStringSubmatch(f)
-						if m == nil || "1"+m[2]+"/" != spec || !strings.EqualFold(m[1], strings.TrimSuffix(strings.TrimPrefix(kind, "etsi_"), "/")) {
-							continue
-						}
-						vm := versionRE.FindStringSubmatch(v)
-						if m[3] != vm[1] || m[4] != vm[2] || m[5] != vm[3] {
-							continue
-						}
-						a, _ := strconv.Atoi(m[3])
-						b, _ := strconv.Atoi(m[4])
-						d, _ := strconv.Atoi(m[5])
-						number := m[2][:2] + "." + m[2][2:5]
-						if len(m[2]) == 7 {
-							number += "-" + m[2][5:]
-						}
-						docs = append(docs, Document{ID: strings.ToUpper(m[1]) + " " + number, Version: fmt.Sprintf("%d.%d.%d", a, b, d), Series: m[2][:2], URL: join(vp, f)})
-						found = true
-						break
-					}
-					if found {
-						break
-					}
-				}
-			}
-		}
-		if count == 0 {
-			return nil, fmt.Errorf("no 3GPP directories found at %s", root)
-		}
-	}
-	en, err := c.discoverMobileEN(ctx, join(base, "etsi_en/"))
+	err := c.Stream(ctx, 8, func(doc Document) error { docs = append(docs, doc); return nil })
 	if err != nil {
 		return nil, err
 	}
-	docs = append(docs, en...)
-	gts, err := c.discoverGTS(ctx, join(base, "etsi_gts/"))
-	if err != nil {
-		return nil, err
+	// Keep the collecting API deterministic; the indexer uses Stream directly.
+	order := func(id string) string {
+		if strings.HasPrefix(id, "TS ") {
+			return "0" + id
+		}
+		if strings.HasPrefix(id, "TR ") {
+			return "1" + id
+		}
+		return "2" + id
 	}
-	docs = append(docs, gts...)
-	if len(docs) == 0 {
-		return nil, fmt.Errorf("no ETSI PDFs discovered")
-	}
+	sort.Slice(docs, func(i, j int) bool { return order(docs[i].ID) < order(docs[j].ID) })
 	return docs, nil
 }
 
@@ -433,7 +361,7 @@ func (c Client) discoverGTS(ctx context.Context, root string) ([]Document, error
 // headingMatch avoids invoking the regular expression on ordinary prose lines.
 func headingMatch(line string) []string {
 	trimmed := strings.TrimLeft(line, " \t\r\n\f")
-	if trimmed == "" || !((trimmed[0] >= '0' && trimmed[0] <= '9') || (trimmed[0] >= 'A' && trimmed[0] <= 'Z')) {
+	if trimmed == "" || ((trimmed[0] < '0' || trimmed[0] > '9') && (trimmed[0] < 'A' || trimmed[0] > 'Z')) {
 		return nil
 	}
 	return headingRE.FindStringSubmatch(line)
@@ -480,7 +408,7 @@ func ParseText(doc Document, text string) (db.Spec, []db.Section, error) {
 		if m != nil && len(toc) >= 4 {
 			title, exists := toc[m[1]]
 			candidate := strings.Join(strings.Fields(m[2]), " ")
-			if !exists || (candidate != title && !(len(candidate) >= 12 && strings.HasPrefix(title, candidate)) && !(len(title) >= 12 && strings.HasPrefix(candidate, title))) {
+			if !exists || (candidate != title && (len(candidate) < 12 || !strings.HasPrefix(title, candidate)) && (len(title) < 12 || !strings.HasPrefix(candidate, title))) {
 				m = nil
 			}
 		}

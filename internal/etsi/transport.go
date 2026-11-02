@@ -135,7 +135,7 @@ func newTransport(roots *x509.CertPool, proxy func(*http.Request) (*url.URL, err
 			}
 			u = utls.UClient(conn, config, utls.HelloCustom)
 			if e = u.ApplyPreset(&spec); e != nil {
-				return nil, fmt.Errorf("Chrome TLS profile: %w", e)
+				return nil, fmt.Errorf("chrome TLS profile: %w", e)
 			}
 		}
 		if err = u.HandshakeContext(ctx); err != nil {

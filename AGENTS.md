@@ -184,3 +184,17 @@ workspace removed before return. CLI `analyze-dump` also deletes the named input
 file. Never add capture caches or upload IDs. `tshark -n -r` must stay offline;
 limits are in `internal/dump`. Transport/client attachment retention is outside
 the service's control. No live capture privileges are required.
+
+## Host indexer and Docker server
+
+The `work` deployment uses `cmd/3gpp-index` (ETSI/GSM/RFC imports) on the
+host and `cmd/3gpp-server` in `Dockerfile.mcp` / `compose.yaml`. The ETSI
+`Client.Stream` feeds bounded download/convert workers while discovery continues;
+`Discover` is its deterministic collecting adapter. `--workers` controls import
+workers and `--scrape-workers` controls concurrent version listings. A listing
+failure can leave a partial DB; rerun with `--resume` and keep the server stopped
+until indexing and finalization succeed. `internal/buildinfo.Version` is the
+shared default version; executable `main.version` variables remain overridable
+with ldflags. `NewPDFServer` must expose `search_all` and `analyze_dump`; Docker
+includes tshark and needs the ephemeral `/tmp` mount in Compose. Release binaries
+are GitHub assets, not tracked files under `bin/`.

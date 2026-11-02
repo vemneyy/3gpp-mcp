@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/higebu/3gpp-mcp/internal/asn1index"
+	"github.com/higebu/3gpp-mcp/internal/buildinfo"
 	"github.com/higebu/3gpp-mcp/internal/converter/pipeline"
 	"github.com/higebu/3gpp-mcp/internal/db"
 	"github.com/higebu/3gpp-mcp/internal/openapiindex"
@@ -31,7 +32,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z".
-var version = "0.2.0"
+var version = buildinfo.Version
 
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

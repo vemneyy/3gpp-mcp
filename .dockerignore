@@ -4,3 +4,10 @@ bin
 data
 specs
 *.md
+
+work
+dist
+e2e/node_modules
+e2e/test-results
+*.pcap
+*.pcapng

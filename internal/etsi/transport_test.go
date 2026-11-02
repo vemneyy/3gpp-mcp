@@ -32,13 +32,13 @@ func TestChromeTransportDirectAndProxy(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
 			t.Errorf("method=%s", r.Method)
-			http.Error(w, "CONNECT required", 405)
+			http.Error(w, "CONNECT required", http.StatusMethodNotAllowed)
 			return
 		}
 		proxyCalls.Add(1)
 		dest, err := net.Dial("tcp", r.Host)
 		if err != nil {
-			http.Error(w, "dial failed", 502)
+			http.Error(w, "dial failed", http.StatusBadGateway)
 			return
 		}
 		client, buf, err := w.(http.Hijacker).Hijack()

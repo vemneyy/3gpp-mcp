@@ -15,19 +15,32 @@ import (
 	"time"
 
 	"github.com/higebu/3gpp-mcp/internal/asn1index"
+	"github.com/higebu/3gpp-mcp/internal/buildinfo"
 	"github.com/higebu/3gpp-mcp/internal/db"
 	"github.com/higebu/3gpp-mcp/internal/etsi"
 	"github.com/higebu/3gpp-mcp/internal/rfc"
+	"syscall"
 )
 
+var version = buildinfo.Version
+
 func main() {
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	scrapeWorkers := flag.Int("scrape-workers", 8, "Parallel ETSI version discovery workers")
 	source := flag.String("source", "etsi", "Source to index: etsi, rfc or all")
 	rfcBase := flag.String("rfc-base", rfc.DefaultBase, "RFC Editor base URL")
 	database := flag.String("db", "3gpp.db", "SQLite database path")
 	base := flag.String("base", etsi.DefaultBase, "ETSI deliver directory URL")
 	resume := flag.Bool("resume", false, "Resume an incomplete database and update changed versions")
-	workers := flag.Int("workers", 4, "Number of parallel PDF downloads and conversions")
+	workers := flag.Int("workers", 8, "Number of parallel PDF downloads and conversions")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("3gpp-index " + version)
+		return
+	}
+	if *scrapeWorkers < 1 {
+		log.Fatal("scrape-workers must be positive")
+	}
 	if *workers < 1 {
 		log.Fatal("workers must be positive")
 	}
@@ -35,7 +48,7 @@ func main() {
 		log.Fatal("source must be etsi, rfc or all")
 	}
 	if *source == "rfc" {
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		runRFC(ctx, database, rfcBase, workers, resume)
 		return
@@ -45,15 +58,10 @@ func main() {
 	} else if err != nil && !os.IsNotExist(err) {
 		log.Fatal(err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	client := etsi.Client{Base: *base, Progress: func(message string) { log.Print(message) }}
-	log.Print("Starting ETSI catalogue discovery; this can take a long time")
-	docs, err := client.Discover(ctx)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("Discovered %d specifications", len(docs))
+
 	d, err := db.OpenReadWrite(*database)
 	if err != nil {
 		log.Fatal(err)
@@ -62,19 +70,15 @@ func main() {
 	if err = d.InitSchema(); err != nil {
 		log.Fatal(err)
 	}
-	jobs := make(chan etsi.Document)
+	jobs := make(chan etsi.Document, *workers)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var failures, indexed, skipped, resumed, completed int
 	started := time.Now()
 	report := func() {
-		elapsed := time.Since(started)
-		eta := "unknown"
-		if completed > 0 && completed < len(docs) {
-			eta = (elapsed * time.Duration(len(docs)-completed) / time.Duration(completed)).Round(time.Second).String()
-		}
-		log.Printf("Progress: %d/%d (%.1f%%); indexed=%d, non-3GPP=%d, already indexed=%d, failed=%d; elapsed=%s; estimated remaining=%s", completed, len(docs), 100*float64(completed)/float64(len(docs)), indexed, skipped, resumed, failures, elapsed.Round(time.Second), eta)
+		log.Printf("Progress: completed=%d, indexed=%d, non-3GPP=%d, already indexed=%d, failed=%d; elapsed=%s (discovery streaming)", completed, indexed, skipped, resumed, failures, time.Since(started).Round(time.Second))
 	}
+
 	for i := 0; i < *workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -105,8 +109,7 @@ func main() {
 			}
 		}()
 	}
-sendJobs:
-	for _, doc := range docs {
+	discoveryErr := client.Stream(ctx, *scrapeWorkers, func(doc etsi.Document) error {
 		if *resume {
 			versions, e := d.ListSpecVersions(ctx, doc.ID)
 			if e != nil {
@@ -114,7 +117,7 @@ sendJobs:
 				mu.Lock()
 				failures++
 				mu.Unlock()
-				continue
+				return nil
 			}
 			if len(versions) == 0 {
 				// ETSI paths pad part numbers, while 3GPP cover pages may not.
@@ -127,7 +130,7 @@ sendJobs:
 							mu.Lock()
 							failures++
 							mu.Unlock()
-							continue
+							return nil
 						}
 					}
 				}
@@ -139,7 +142,7 @@ sendJobs:
 					mu.Lock()
 					failures++
 					mu.Unlock()
-					continue
+					return nil
 				}
 				if ready {
 					mu.Lock()
@@ -147,23 +150,30 @@ sendJobs:
 					completed++
 					report()
 					mu.Unlock()
-					continue
+					return nil
 				}
 			}
 		}
 		select {
 		case jobs <- doc:
+			return nil
 		case <-ctx.Done():
-			break sendJobs
+			return ctx.Err()
 		}
-	}
+	})
 	close(jobs)
 	wg.Wait()
 	if _, err = asn1index.Rebuild(ctx, d); err != nil {
 		log.Printf("ASN.1 index: %v", err)
+		if dropErr := d.DropASN1Index(); dropErr != nil {
+			log.Printf("drop stale ASN.1 index: %v", dropErr)
+		}
 		failures++
 	}
-	if failures > 0 || ctx.Err() != nil {
+	if discoveryErr != nil {
+		log.Printf("Discovery incomplete: %v", discoveryErr)
+	}
+	if failures > 0 || ctx.Err() != nil || discoveryErr != nil {
 		fmt.Fprintf(os.Stderr, "Indexing incomplete: %d failed; database is partial\n", failures)
 		os.Exit(1)
 	}

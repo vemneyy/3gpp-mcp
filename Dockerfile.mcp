@@ -1,12 +1,16 @@
-FROM golang:1.26-bookworm AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum ./
-RUN --mount=type=secret,id=build_ca if [ -f /run/secrets/build_ca ]; then SSL_CERT_FILE=/run/secrets/build_ca go mod download; else go mod download; fi
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /3gpp-server ./cmd/3gpp-server
+RUN --mount=type=secret,id=build_ca \
+    if [ -f /run/secrets/build_ca ]; then export SSL_CERT_FILE=/run/secrets/build_ca; fi; \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /3gpp-server ./cmd/3gpp-server
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /3gpp-server /3gpp-server
+USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/3gpp-server"]
 CMD ["-db", "/data/3gpp.db", "-transport", "http", "-addr", ":8080"]

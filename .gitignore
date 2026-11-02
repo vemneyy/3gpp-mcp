@@ -35,3 +35,9 @@ e2e/playwright-report/
 *.pcap
 *.pcapng
 *.cap
+
+# Local credentials and build intermediates
+.env
+.env.*
+!.env.example
+work/
