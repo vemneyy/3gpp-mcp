@@ -31,7 +31,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z".
-var version = "dev"
+var version = "0.2.0"
 
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -66,6 +66,7 @@ func buildHTTPHandler(src *tools.Source, s *mcp.Server, bearerToken string, enab
 	mcpHandler := tools.NewStreamableHTTPHandler(s)
 
 	appMux := http.NewServeMux()
+	appMux.Handle("/analyze-dump", tools.AnalyzeDumpHTTP(src.DB))
 	if enableWeb {
 		appMux.Handle("/mcp/", http.StripPrefix("/mcp", mcpHandler))
 		appMux.Handle("/", web.NewServer(src))
@@ -101,6 +102,7 @@ var commands []command
 
 func init() {
 	commands = []command{
+		{name: "version", aliases: []string{"--version", "-version", "-v"}, desc: "Print the server version", run: cmdVersion},
 		{name: "serve", desc: "Start the MCP server", run: cmdServe},
 		{name: "build", aliases: []string{"pipeline"}, desc: "Download and import specs into database", run: cmdPipeline},
 		{name: "download", desc: "Download spec files from 3GPP archive", run: cmdDownload},
@@ -116,6 +118,8 @@ func init() {
 		{name: "get-section", desc: "Print a section's markdown content", run: cmdGetSection},
 		{name: "get-asn1", desc: "Print ASN.1 definitions from a specification", run: cmdGetASN1},
 		{name: "compare-versions", desc: "Compare two versions of a specification", run: cmdCompareVersions},
+		{name: "search-all", desc: "Search clause text and OpenAPI across all specifications", run: cmdSearchAll},
+		{name: "analyze-dump", desc: "Analyze a PCAP/PCAPNG locally and delete it", run: cmdAnalyzeDump},
 		{name: "search", desc: "Full-text search across specifications", run: cmdSearch},
 		{name: "list-openapi", desc: "List OpenAPI definitions", run: cmdListOpenAPI},
 		{name: "get-openapi", desc: "Print an OpenAPI definition", run: cmdGetOpenAPI},
@@ -154,6 +158,10 @@ func lookupCommand(name string) *command {
 		}
 	}
 	return nil
+}
+
+func cmdVersion(_ []string) {
+	fmt.Fprintln(os.Stdout, "3gpp-mcp "+version)
 }
 
 func main() {
@@ -506,53 +514,6 @@ func specFilterFromFlags(release, maxRelease int, latest bool, spec, series stri
 	return f
 }
 
-// resolveSpecs fetches and parses archive entries, then applies the caller's
-// selector. Build and download always keep one version per spec, so LatestOnly
-// is set here rather than by every caller.
-func resolveSpecs(ctx context.Context, client *http.Client, specList string, filter pipeline.SpecFilter, useCache bool, scrapeConcurrency int) []*pipeline.SpecVersion {
-	var entries []string
-	var err error
-	if specList != "" {
-		fmt.Printf("Loading spec list from %s...\n", specList)
-		entries, err = pipeline.LoadSpecList(specList)
-		if err != nil {
-			log.Fatalf("Failed to load spec list: %v", err)
-		}
-	} else if filter.SpecID != "" {
-		fmt.Printf("Fetching versions for %s...\n", filter.SpecID)
-		entries, err = pipeline.FetchSpecZips(ctx, client, filter.SpecID, useCache)
-		if err != nil {
-			log.Fatalf("Failed to fetch spec versions: %v", err)
-		}
-	} else {
-		fmt.Println("Fetching spec list from 3GPP archive...")
-		entries, err = pipeline.FetchSpecList(ctx, client, filter.Series, useCache, scrapeConcurrency)
-		var partial *pipeline.PartialSpecListError
-		if errors.As(err, &partial) {
-			// Proceeding would silently drop every spec under the failed
-			// directories from the result, so a build or download from this
-			// list would be quietly incomplete.
-			log.Printf("Aborting: %v; rerun to retry", partial)
-			exit(1)
-			return nil
-		}
-		if err != nil {
-			log.Fatalf("Failed to fetch spec list: %v", err)
-		}
-	}
-
-	var specs []*pipeline.SpecVersion
-	for _, e := range entries {
-		if s := pipeline.ParseSpecEntry(e); s != nil {
-			specs = append(specs, s)
-		}
-	}
-	fmt.Printf("Parsed %d spec entries\n", len(specs))
-
-	filter.LatestOnly = true
-	return pipeline.FilterSpecs(specs, filter)
-}
-
 func cmdDownload(args []string) {
 	fs := flag.NewFlagSet("download", flag.ExitOnError)
 	release := fs.Int("release", 0, "Download specs for specific release (e.g., 19)")
@@ -561,7 +522,7 @@ func cmdDownload(args []string) {
 	seriesFlag := fs.String("series", "", "Filter by series, comma-separated (e.g., 23,29)")
 	specFlag := fs.String("spec", "", "Download specific spec (e.g., 23.501)")
 	outputDir := fs.String("output-dir", "specs", "Output directory")
-	parallel := fs.Int("parallel", runtime.NumCPU(), "Number of parallel downloads")
+	parallel := fs.Int("parallel", 0, "Number of parallel downloads (0 = auto, at least 8)")
 	convertDoc := fs.Bool("convert-doc", false, "Convert .doc to .docx using LibreOffice")
 	specList := fs.String("spec-list", "", "Use spec list file instead of scraping")
 	noCache := fs.Bool("no-cache", false, "Disable spec list cache")
@@ -574,19 +535,23 @@ func cmdDownload(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	client := &http.Client{Timeout: *timeout}
-	filtered := resolveSpecs(ctx, client, *specList, filter, !*noCache, *scrapeWorkers)
 
-	if len(filtered) == 0 {
-		fmt.Println("No specs matched the filters.")
-		return
-	}
-
-	fmt.Printf("Downloading %d specs to %s...\n", len(filtered), *outputDir)
 	if err := os.MkdirAll(*outputDir, 0o755); err != nil {
 		log.Fatalf("Failed to create output directory: %v", err)
 	}
-
-	stats := pipeline.DownloadSpecs(ctx, client, filtered, *outputDir, *parallel, *convertDoc, *timeout)
+	source := func(ctx context.Context, emit func(*pipeline.SpecVersion) error) error {
+		return pipeline.Discover(ctx, client, *specList, filter, !*noCache, *scrapeWorkers, emit)
+	}
+	stats, err := pipeline.DownloadSource(ctx, client, source, *outputDir, *parallel, *convertDoc, *timeout)
+	if err != nil {
+		log.Printf("Download failed: %v", err)
+		exit(1)
+		return
+	}
+	if stats["OK"]+stats["FAILED"]+stats["DOC_ONLY"]+stats["NO_DOC"] == 0 {
+		fmt.Println("No specs matched the filters.")
+		return
+	}
 
 	fmt.Println("\nDownload complete:")
 	for status, count := range stats {
@@ -604,7 +569,7 @@ func cmdPipeline(args []string) {
 	latest := fs.Bool("latest", false, "Select every spec at its latest version (use when no other selector is given)")
 	seriesFlag := fs.String("series", "", "Filter by series, comma-separated (e.g., 23,29)")
 	specFlag := fs.String("spec", "", "Download specific spec (e.g., 23.501)")
-	workers := fs.Int("workers", runtime.NumCPU(), "Number of parallel workers")
+	workers := fs.Int("workers", 0, "Number of parallel workers (0 = auto, at least 8)")
 	convertDoc := fs.Bool("convert-doc", false, "Convert .doc to .docx using LibreOffice")
 	convertImage := fs.Bool("convert-image", false, "Convert EMF/WMF images to PNG using LibreOffice (requires soffice)")
 	specList := fs.String("spec-list", "", "Use spec list file instead of scraping")
@@ -615,23 +580,21 @@ func cmdPipeline(args []string) {
 
 	filter := specFilterFromFlags(*release, *maxRelease, *latest, *specFlag, *seriesFlag)
 
-	// Resolve specs before opening the database: resolveSpecs exits via
-	// log.Fatalf on failure, which must not strand an open WAL-mode database.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	client := &http.Client{Timeout: *timeout}
-	filtered := resolveSpecs(ctx, client, *specList, filter, !*noCache, *scrapeWorkers)
-
-	if err := runPipeline(ctx, *dbPath, client, filtered, *workers, *convertDoc, *convertImage, *timeout); err != nil {
+	source := func(ctx context.Context, emit func(*pipeline.SpecVersion) error) error {
+		return pipeline.Discover(ctx, client, *specList, filter, !*noCache, *scrapeWorkers, emit)
+	}
+	if err := runPipelineSource(ctx, *dbPath, client, source, *workers, *convertDoc, *convertImage, *timeout); err != nil {
 		log.Printf("Pipeline failed: %v", err)
 		exit(1)
 	}
+
 }
 
-// runPipeline opens the database and feeds specs through the download +
-// convert pipeline, closing the database again — also on failure, so no WAL
-// sidecars are left behind when the caller exits via log.Fatalf.
-func runPipeline(ctx context.Context, dbPath string, client *http.Client, specs []*pipeline.SpecVersion, workers int, convertDoc, convertImage bool, timeout time.Duration) error {
+// runPipelineSource overlaps discovery and import and refreshes derived indexes.
+func runPipelineSource(ctx context.Context, dbPath string, client *http.Client, source pipeline.SpecSource, workers int, convertDoc, convertImage bool, timeout time.Duration) error {
 	d, err := db.OpenReadWrite(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -641,13 +604,6 @@ func runPipeline(ctx context.Context, dbPath string, client *http.Client, specs 
 	if err := d.InitSchema(); err != nil {
 		return fmt.Errorf("init schema: %w", err)
 	}
-
-	if len(specs) == 0 {
-		fmt.Println("No specs matched the filters.")
-		return nil
-	}
-
-	fmt.Printf("Processing %d specs with %d workers...\n", len(specs), workers)
 
 	p := &pipeline.Pipeline{
 		DB:           d,
@@ -661,14 +617,17 @@ func runPipeline(ctx context.Context, dbPath string, client *http.Client, specs 
 	// Run's errors are self-describing ("all N specs failed", ctx.Err()), and
 	// cmdPipeline prefixes "Pipeline failed:" — wrapping here would only
 	// repeat that context.
-	if err := p.Run(ctx, specs); err != nil {
-		return err
+	count := 0
+	runErr := p.RunSource(ctx, func(ctx context.Context, emit func(*pipeline.SpecVersion) error) error {
+		return source(ctx, func(spec *pipeline.SpecVersion) error { count++; return emit(spec) })
+	})
+	if count == 0 {
+		if runErr == nil {
+			fmt.Println("No specs matched the filters.")
+		}
+		return runErr
 	}
-
-	if err := refreshOpenAPIIndexAfterImport(ctx, d); err != nil {
-		return err
-	}
-	return refreshASN1IndexAfterImport(ctx, d)
+	return errors.Join(runErr, refreshOpenAPIIndexAfterImport(ctx, d), refreshASN1IndexAfterImport(ctx, d))
 }
 
 // rebuildOpenAPIIndex refreshes the search_openapi index and reports what it
@@ -976,7 +935,7 @@ func cmdUpdate(args []string) {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	dbPath := fs.String("db", "3gpp.db", "SQLite database path")
 	maxRelease := fs.Int("max-release", 0, "Cap updates at this release: update each spec to its newest version at or below it (e.g., 19)")
-	workers := fs.Int("workers", runtime.NumCPU(), "Number of parallel workers")
+	workers := fs.Int("workers", 0, "Number of parallel workers (0 = auto, at least 8)")
 	convertDoc := fs.Bool("convert-doc", false, "Convert .doc to .docx using LibreOffice")
 	convertImage := fs.Bool("convert-image", false, "Convert EMF/WMF images to PNG using LibreOffice (requires soffice)")
 	specList := fs.String("spec-list", "", "Use spec list file instead of scraping")
@@ -1031,142 +990,99 @@ func cmdUpdate(args []string) {
 	client := newHTTPClient(*timeout)
 	useCache := !*noCache
 
-	// Fetch latest versions from FTP
-	var entries []string
-	if *specList != "" {
-		entries, err = pipeline.LoadSpecList(*specList)
-	} else {
-		fmt.Println("Fetching spec list from 3GPP archive...")
-		entries, err = pipeline.FetchSpecList(ctx, client, nil, useCache, *scrapeWorkers)
+	normalizeID := func(id string) string { return strings.TrimPrefix(strings.TrimPrefix(id, "TS "), "TR ") }
+	dbVersions := make(map[string]db.Spec)
+	for _, spec := range currentResult.Specs {
+		dbVersions[normalizeID(spec.ID)] = spec
 	}
-	// A partial list is survivable here: a spec missing from it is skipped
-	// rather than deleted, so the cost is missed updates until the next run.
-	var partial *pipeline.PartialSpecListError
-	if errors.As(err, &partial) {
-		log.Printf("warning: %v; specs under the failed directories will not be updated this run", partial)
-		err = nil
-	}
-	if err != nil {
-		discardWorkingCopy(newPath)
-		log.Fatalf("Failed to fetch spec list: %v", err)
-	}
-
-	var allSpecs []*pipeline.SpecVersion
-	for _, e := range entries {
-		if s := pipeline.ParseSpecEntry(e); s != nil {
-			allSpecs = append(allSpecs, s)
-		}
-	}
-
-	// A database built with --max-release must be updated with the same cap,
-	// otherwise every spec is dragged up to the newest release on the archive.
-	latestSpecs := pipeline.FilterSpecs(allSpecs, pipeline.SpecFilter{MaxRelease: *maxRelease, LatestOnly: true})
-
-	// Find specs that need updating
-	normalizeID := func(id string) string {
-		return strings.TrimPrefix(strings.TrimPrefix(id, "TS "), "TR ")
-	}
-	dbVersions := make(map[string]string)
-	for _, s := range currentResult.Specs {
-		dbVersions[normalizeID(s.ID)] = s.Version
-	}
-
-	// Specs the cap excludes entirely: the archive has the spec, but every
-	// version of it is above the cap. Leaving them would keep the database
-	// above --max-release however often it is updated, so they go. Only specs
-	// the listing actually carried are considered — one missing from a partial
-	// listing is skipped, like everywhere else in this command, rather than
-	// deleted on the strength of a failed fetch.
-	var removals []string
-	if *maxRelease > 0 {
-		inArchive := make(map[string]bool, len(allSpecs))
-		for _, sv := range allSpecs {
-			inArchive[normalizeID(sv.SpecID)] = true
-		}
-		underCap := make(map[string]bool, len(latestSpecs))
-		for _, sv := range latestSpecs {
-			underCap[normalizeID(sv.SpecID)] = true
-		}
-		for _, s := range currentResult.Specs {
-			normID := normalizeID(s.ID)
-			if inArchive[normID] && !underCap[normID] {
-				fmt.Printf("  %s: %s -> removed (no version at or below release %d)\n", s.ID, s.Version, *maxRelease)
-				removals = append(removals, s.ID)
-			}
-		}
-	}
-
-	var updates []*pipeline.SpecVersion
-	for _, sv := range latestSpecs {
-		normID := normalizeID(sv.SpecID)
-		oldVer, ok := dbVersions[normID]
-		if !ok {
-			continue
-		}
-		// Stored versions are the dotted form, so compare in that form rather
-		// than on the archive token.
-		newVer, ok := specver.TokenToDotted(pipeline.SpecVersionString(sv))
-		if !ok {
-			continue
-		}
-		// A cap makes the target version the newest one at or below it, which
-		// can be older than what is stored — a database built without the cap
-		// holds versions above it. Move to the target in either direction then,
-		// or applying a cap to an existing database would be a no-op.
-		changed := specver.Compare(newVer, oldVer) > 0
-		if *maxRelease > 0 {
-			changed = specver.Compare(newVer, oldVer) != 0
-		}
-		if changed {
-			fmt.Printf("  %s: %s -> %s\n", sv.SpecID, oldVer, newVer)
-			updates = append(updates, sv)
-		}
-	}
-
-	if len(updates) == 0 && len(removals) == 0 {
-		fmt.Println("All specs are up to date.")
-		discardWorkingCopy(newPath)
-		return
-	}
-
-	fmt.Printf("\n%d specs to update", len(updates))
-	if len(removals) > 0 {
-		fmt.Printf(", %d to remove", len(removals))
-	}
-	fmt.Println()
-
 	d, err := db.OpenReadWrite(newPath)
 	if err != nil {
 		discardWorkingCopy(newPath)
 		log.Fatalf("Failed to open working copy: %v", err)
 	}
-	// VACUUM INTO copies whatever schema the live database has, which may
-	// predate the current binary.
 	if err := d.InitSchema(); err != nil {
 		_ = d.Close()
 		discardWorkingCopy(newPath)
 		log.Fatalf("Failed to initialize working copy schema: %v", err)
 	}
-
+	var removals []string
+	updates := 0
+	source := func(ctx context.Context, emit func(*pipeline.SpecVersion) error) error {
+		batch := func(entries []string) error {
+			var all []*pipeline.SpecVersion
+			for _, entry := range entries {
+				if spec := pipeline.ParseSpecEntry(entry); spec != nil {
+					all = append(all, spec)
+				}
+			}
+			latest := pipeline.FilterSpecs(all, pipeline.SpecFilter{MaxRelease: *maxRelease, LatestOnly: true})
+			underCap := make(map[string]bool)
+			for _, spec := range latest {
+				id := normalizeID(spec.SpecID)
+				underCap[id] = true
+				old, ok := dbVersions[id]
+				if !ok {
+					continue
+				}
+				version, ok := specver.TokenToDotted(pipeline.SpecVersionString(spec))
+				if !ok {
+					continue
+				}
+				changed := specver.Compare(version, old.Version) > 0
+				if *maxRelease > 0 {
+					changed = specver.Compare(version, old.Version) != 0
+				}
+				if changed {
+					fmt.Printf("  %s: %s -> %s\n", spec.SpecID, old.Version, version)
+					if err := emit(spec); err != nil {
+						return err
+					}
+					updates++
+				}
+			}
+			if *maxRelease > 0 {
+				seen := make(map[string]bool)
+				for _, spec := range all {
+					id := normalizeID(spec.SpecID)
+					if old, ok := dbVersions[id]; ok && !underCap[id] && !seen[id] {
+						seen[id] = true
+						removals = append(removals, old.ID)
+						fmt.Printf("  %s: %s -> removed (no version at or below release %d)\n", old.ID, old.Version, *maxRelease)
+					}
+				}
+			}
+			return nil
+		}
+		if *specList != "" {
+			entries, err := pipeline.LoadSpecList(*specList)
+			if err != nil {
+				return fmt.Errorf("fetch spec list: %w", err)
+			}
+			return batch(entries)
+		}
+		err := pipeline.StreamSpecList(ctx, client, nil, useCache, *scrapeWorkers, batch)
+		var partial *pipeline.PartialSpecListError
+		if errors.As(err, &partial) {
+			log.Printf("warning: %v; specs under the failed directories will not be updated this run", partial)
+			return nil
+		}
+		return err
+	}
+	p := &pipeline.Pipeline{DB: d, Client: client, Workers: *workers, ConvertDoc: *convertDoc, ConvertImage: *convertImage, Timeout: *timeout}
+	if err := p.RunSource(ctx, source); err != nil {
+		_ = d.Close()
+		discardWorkingCopy(newPath)
+		log.Fatalf("Update failed: %v", err)
+	}
+	if updates == 0 && len(removals) == 0 {
+		_ = d.Close()
+		fmt.Println("All specs are up to date.")
+		discardWorkingCopy(newPath)
+		return
+	}
+	fmt.Printf("%d specs to update, %d to remove\n", updates, len(removals))
 	for _, id := range removals {
 		if err := d.DeleteSpec(id); err != nil {
-			_ = d.Close()
-			discardWorkingCopy(newPath)
-			log.Fatalf("Update failed: %v", err)
-		}
-	}
-
-	if len(updates) > 0 {
-		p := &pipeline.Pipeline{
-			DB:           d,
-			Client:       client,
-			Workers:      *workers,
-			ConvertDoc:   *convertDoc,
-			ConvertImage: *convertImage,
-			Timeout:      *timeout,
-		}
-
-		if err := p.Run(ctx, updates); err != nil {
 			_ = d.Close()
 			discardWorkingCopy(newPath)
 			log.Fatalf("Update failed: %v", err)

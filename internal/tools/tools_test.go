@@ -755,20 +755,6 @@ func TestHandleSearch_SpecIDs(t *testing.T) {
 		}
 	})
 
-	t.Run("spec_id backward compat", func(t *testing.T) {
-		result, _, err := handler(context.Background(), nil, SearchInput{
-			Query:  "Scope",
-			SpecID: "TS 29.510",
-		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		text := getTextContent(result)
-		if !strings.Contains(text, "TS 29.510") {
-			t.Errorf("expected TS 29.510, got: %s", text)
-		}
-	})
-
 	t.Run("multi spec_ids", func(t *testing.T) {
 		result, _, err := handler(context.Background(), nil, SearchInput{
 			Query:   "Scope",

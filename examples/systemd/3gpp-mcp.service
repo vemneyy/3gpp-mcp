@@ -6,8 +6,9 @@ After=network.target
 Type=simple
 User=3gpp-mcp
 Group=3gpp-mcp
-ExecStart=/usr/local/bin/3gpp-mcp --db /var/lib/3gpp-mcp/3gpp.db --transport http --addr :8080
+ExecStart=/usr/local/bin/3gpp-mcp serve --db /var/lib/3gpp-mcp/3gpp.db --transport http --addr :8080
 EnvironmentFile=-/etc/3gpp-mcp/env
+Environment=XDG_CACHE_HOME=/var/lib/3gpp-mcp/cache
 Restart=on-failure
 RestartSec=5
 

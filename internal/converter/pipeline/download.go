@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -257,6 +258,23 @@ func ConvertDocFiles(ctx context.Context, docDir, outputDir string) (int, error)
 
 // DownloadSpecs downloads specs in parallel to the output directory (no conversion).
 func DownloadSpecs(ctx context.Context, client *http.Client, specs []*SpecVersion, outputDir string, parallel int, convertDoc bool, timeout time.Duration) map[string]int {
+	stats, _ := DownloadSource(ctx, client, func(ctx context.Context, emit func(*SpecVersion) error) error {
+		for _, spec := range specs {
+			if err := emit(spec); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, outputDir, parallel, convertDoc, timeout)
+	return stats
+}
+
+// DownloadSource overlaps archive discovery and downloads with bounded workers.
+// The caller receives discovery errors instead of silently using partial lists.
+func DownloadSource(ctx context.Context, client *http.Client, source SpecSource, outputDir string, parallel int, convertDoc bool, timeout time.Duration) (map[string]int, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
@@ -265,46 +283,55 @@ func DownloadSpecs(ctx context.Context, client *http.Client, specs []*SpecVersio
 	}
 
 	stats := map[string]int{"OK": 0, "DOC_ONLY": 0, "NO_DOC": 0, "FAILED": 0}
-	total := len(specs)
 
-	sem := make(chan struct{}, parallel)
+	jobs := make(chan *SpecVersion, parallel)
 	type result struct {
 		specID    string
 		status    string
 		docFiles  []string
 		docxFiles []string
 	}
-	results := make(chan result, total)
+	results := make(chan result, parallel)
 	var wg sync.WaitGroup
 
-	for _, spec := range specs {
-		spec := spec
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
+	for range parallel {
+		wg.Go(func() {
+			for spec := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				r, err := DownloadAndExtract(ctx, client, spec, outputDir, timeout)
+				if err != nil {
+					log.Printf("%s: download error: %v", spec.SpecID, err)
+				}
+				status := "FAILED"
+				var docFiles, docxFiles []string
+				if r != nil {
+					status = r.Status
+					docFiles = r.DocFiles
+					docxFiles = r.DocxFiles
+				}
+				results <- result{spec.SpecID, status, docFiles, docxFiles}
 			}
-			defer func() { <-sem }()
-
-			r, err := DownloadAndExtract(ctx, client, spec, outputDir, timeout)
-			if err != nil {
-				log.Printf("  %s: download error: %v", spec.SpecID, err)
-			}
-			status := "FAILED"
-			var docFiles, docxFiles []string
-			if r != nil {
-				status = r.Status
-				docFiles = r.DocFiles
-				docxFiles = r.DocxFiles
-			}
-			results <- result{spec.SpecID, status, docFiles, docxFiles}
-		}()
+		})
 	}
-
+	var sourceErr error
 	go func() {
+		sourceErr = source(ctx, func(spec *SpecVersion) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			select {
+			case jobs <- spec:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+		if sourceErr != nil {
+			cancel()
+		}
+		close(jobs)
 		wg.Wait()
 		close(results)
 	}()
@@ -322,7 +349,7 @@ func DownloadSpecs(ctx context.Context, client *http.Client, specs []*SpecVersio
 	for r := range results {
 		i++
 		stats[r.status]++
-		log.Printf("[%d/%d] %s: %s", i, total, r.specID, r.status)
+		log.Printf("[%d] %s: %s", i, r.specID, r.status)
 		if r.status == "DOC_ONLY" && len(r.docFiles) > 0 {
 			docFilesBySpec[r.specID] = r.docFiles
 		}
@@ -585,7 +612,7 @@ func DownloadSpecs(ctx context.Context, client *http.Client, specs []*SpecVersio
 		}
 	}
 
-	return stats
+	return stats, errors.Join(sourceErr, ctx.Err())
 }
 
 // convertedDocxPath returns the .docx path ConvertDocFiles would produce in

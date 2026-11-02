@@ -60,8 +60,25 @@ type Pipeline struct {
 
 // Run processes a list of specs: download, convert, store in DB, and delete temp files.
 func (p *Pipeline) Run(ctx context.Context, specs []*SpecVersion) error {
+	return p.RunSource(ctx, func(ctx context.Context, emit func(*SpecVersion) error) error {
+		for _, spec := range specs {
+			if err := emit(spec); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// SpecSource discovers specs and emits each selected version once. Implementations
+// must respect ctx and propagate emit errors.
+type SpecSource func(context.Context, func(*SpecVersion) error) error
+
+// RunSource overlaps discovery, download, conversion and storage with bounded
+// workers and queues. It always joins workers before returning, including errors.
+func (p *Pipeline) RunSource(ctx context.Context, source SpecSource) error {
 	if p.Workers <= 0 {
-		p.Workers = runtime.NumCPU()
+		p.Workers = defaultConcurrency()
 	}
 	if p.Timeout == 0 {
 		p.Timeout = 30 * time.Second
@@ -69,58 +86,53 @@ func (p *Pipeline) Run(ctx context.Context, specs []*SpecVersion) error {
 	if p.Client == nil {
 		p.Client = &http.Client{Timeout: p.Timeout}
 	}
-
-	sem := make(chan struct{}, p.Workers)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan *SpecVersion, p.Workers)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	stats := map[string]int{"OK": 0, "DOC_ONLY": 0, "NO_DOC": 0, "FAILED": 0}
 	var docOnlySpecs []string
-	total := len(specs)
-
-	for i, spec := range specs {
-		if ctx.Err() != nil {
-			// Stop launching, but fall through to wg.Wait: workers still
-			// running must finish (or notice the cancellation) so their
-			// temp directories are removed and DB writes complete.
-			break
-		}
-
-		spec := spec
-		idx := i + 1
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
+	for range p.Workers {
+		wg.Go(func() {
+			for spec := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				status, err := p.processOne(ctx, spec)
+				if err != nil {
+					log.Printf("%s: FAILED (%v)", spec.SpecID, err)
+				} else {
+					log.Printf("%s: %s", spec.SpecID, status)
+				}
 				mu.Lock()
-				stats["FAILED"]++
+				stats[status]++
+				if status == "DOC_ONLY" {
+					docOnlySpecs = append(docOnlySpecs, spec.SpecID)
+				}
 				mu.Unlock()
-				return
 			}
-			defer func() { <-sem }()
-
-			status, err := p.processOne(ctx, spec)
-			if err != nil {
-				log.Printf("[%d/%d] %s: FAILED (%v)", idx, total, spec.SpecID, err)
-			} else if status == "DOC_ONLY" && !p.ConvertDoc {
-				log.Printf("[%d/%d] %s: DOC_ONLY (use --convert-doc to index)", idx, total, spec.SpecID)
-			} else if status == "DOC_ONLY" && p.ConvertDoc {
-				log.Printf("[%d/%d] %s: DOC_ONLY (conversion failed)", idx, total, spec.SpecID)
-			} else {
-				log.Printf("[%d/%d] %s: %s", idx, total, spec.SpecID, status)
-			}
-
-			mu.Lock()
-			stats[status]++
-			if status == "DOC_ONLY" {
-				docOnlySpecs = append(docOnlySpecs, spec.SpecID)
-			}
-			mu.Unlock()
-		}()
+		})
 	}
-
+	sourceErr := source(ctx, func(spec *SpecVersion) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		select {
+		case jobs <- spec:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	if sourceErr != nil {
+		cancel()
+	}
+	close(jobs)
 	wg.Wait()
+	if sourceErr != nil {
+		return sourceErr
+	}
 
 	log.Println("Pipeline complete:")
 	for status, count := range stats {
@@ -142,7 +154,7 @@ func (p *Pipeline) Run(ctx context.Context, specs []*SpecVersion) error {
 		return err
 	}
 	// A run where nothing succeeded should not report success to cron/CI.
-	if len(specs) > 0 && stats["OK"] == 0 && stats["FAILED"] > 0 {
+	if stats["OK"] == 0 && stats["FAILED"] > 0 {
 		return fmt.Errorf("all %d specs failed", stats["FAILED"])
 	}
 	return nil
@@ -479,48 +491,46 @@ func ConvertDir(ctx context.Context, d *db.DB, dirPath string, workers int, conv
 		err      error
 	}
 
-	results := make(chan result, len(files))
-	sem := make(chan struct{}, workers)
-	var wg sync.WaitGroup
-
-	for _, f := range files {
-		f := f
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				results <- result{path: f, err: ctx.Err()}
-				return
+	results := make(chan result, workers)
+	jobs := make(chan string)
+	parseOne := func(f string) result {
+		if err := ctx.Err(); err != nil {
+			return result{path: f, err: err}
+		}
+		parsed, err := docx.ParseDocx(f)
+		if err != nil {
+			return result{path: f, err: err}
+		}
+		if convertImage {
+			if n := docx.ConvertResultImages(ctx, parsed); n > 0 {
+				docx.UpdateImagePlaceholders(parsed)
 			}
-			defer func() { <-sem }()
-
-			parseResult, err := docx.ParseDocx(f)
-			if err != nil {
-				results <- result{path: f, err: err}
-				return
-			}
-
-			if convertImage {
-				if n := docx.ConvertResultImages(ctx, parseResult); n > 0 {
-					docx.UpdateImagePlaceholders(parseResult)
-				}
-			}
-
-			dbSpec, dbSections, dbImages := convertToDBRecords(parseResult)
-			if r := releaseFromDocxFilename(filepath.Base(f)); r != 0 {
-				dbSpec.Release = strconv.Itoa(r)
-			}
-
-			results <- result{path: f, spec: dbSpec, sections: dbSections, images: dbImages, docType: parseResult.Metadata.DocType}
-		}()
+		}
+		spec, sections, images := convertToDBRecords(parsed)
+		if release := releaseFromDocxFilename(filepath.Base(f)); release != 0 {
+			spec.Release = strconv.Itoa(release)
+		}
+		return result{path: f, spec: spec, sections: sections, images: images, docType: parsed.Metadata.DocType}
 	}
-
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for f := range jobs {
+				results <- parseOne(f)
+			}
+		})
+	}
 	go func() {
-		wg.Wait()
-		close(results)
+		defer close(jobs)
+		for _, f := range files {
+			select {
+			case jobs <- f:
+			case <-ctx.Done():
+				return
+			}
+		}
 	}()
+	go func() { wg.Wait(); close(results) }()
 
 	// Collect results
 	parsed := make(map[string]result)
@@ -533,6 +543,10 @@ func ConvertDir(ctx context.Context, d *db.DB, dirPath string, workers int, conv
 			log.Printf("  %s: %s (%d sections, %d images)", filepath.Base(r.path), r.spec.ID, len(r.sections), len(r.images))
 			parsed[r.path] = r
 		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	if len(parsed) == 0 {

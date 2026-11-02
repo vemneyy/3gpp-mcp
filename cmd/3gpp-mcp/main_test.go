@@ -1053,8 +1053,8 @@ func TestStreamableHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(toolsRes.Tools) != 17 {
-		t.Errorf("got %d tools, want 17", len(toolsRes.Tools))
+	if len(toolsRes.Tools) != 19 {
+		t.Errorf("got %d tools, want 19", len(toolsRes.Tools))
 	}
 
 	res, err := session.CallTool(ctx, &mcp.CallToolParams{
@@ -1130,7 +1130,7 @@ func TestBuildHTTPHandler_WebViewerAuth(t *testing.T) {
 		ts := httptest.NewServer(handler)
 		defer ts.Close()
 
-		for _, path := range []string{"/", "/specs/TS%2023.501", "/search?q=architecture", "/mcp/"} {
+		for _, path := range []string{"/", "/specs/TS%2023.501", "/search?q=architecture", "/mcp/", "/analyze-dump"} {
 			resp, err := http.Get(ts.URL + path)
 			if err != nil {
 				t.Fatalf("GET %s: %v", path, err)
@@ -1607,7 +1607,7 @@ func TestCmdUpdate_SpecListFailureDropsWorkingCopy(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected a non-zero exit for an unreadable spec list, got: %s", out)
 	}
-	if !strings.Contains(string(out), "Failed to fetch spec list") {
+	if !strings.Contains(string(out), "fetch spec list") {
 		t.Errorf("expected the spec list failure to be reported, got: %s", out)
 	}
 	for _, p := range []string{dbPath + ".new", dbPath + ".new-wal", dbPath + ".new-shm"} {
@@ -2373,4 +2373,33 @@ func TestCmdUpdate_UnreadableDB(t *testing.T) {
 	if !strings.Contains(string(out), "Failed to read specs") {
 		t.Errorf("expected the read failure to be reported, got: %s", out)
 	}
+}
+
+// Slice adapters are kept in tests; production commands use streaming sources.
+func resolveSpecs(ctx context.Context, client *http.Client, specList string, filter pipeline.SpecFilter, useCache bool, scrapeConcurrency int) []*pipeline.SpecVersion {
+	if specList != "" {
+		fmt.Printf("Loading spec list from %s...\n", specList)
+	} else if filter.SpecID != "" {
+		fmt.Printf("Fetching versions for %s...\n", filter.SpecID)
+	}
+
+	var specs []*pipeline.SpecVersion
+	err := pipeline.Discover(ctx, client, specList, filter, useCache, scrapeConcurrency, func(spec *pipeline.SpecVersion) error { specs = append(specs, spec); return nil })
+	if err != nil {
+		log.Printf("Failed to discover specifications: %v", err)
+		exit(1)
+		return nil
+	}
+	return specs
+}
+
+func runPipeline(ctx context.Context, dbPath string, client *http.Client, specs []*pipeline.SpecVersion, workers int, convertDoc, convertImage bool, timeout time.Duration) error {
+	return runPipelineSource(ctx, dbPath, client, func(ctx context.Context, emit func(*pipeline.SpecVersion) error) error {
+		for _, spec := range specs {
+			if err := emit(spec); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, workers, convertDoc, convertImage, timeout)
 }

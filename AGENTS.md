@@ -24,10 +24,11 @@ make e2e                  # Playwright suite for web viewer JS behavior (CI job 
 
 - `cmd/3gpp-mcp/` — CLI entry point (serve, build, download, import, import-dir,
   update, plus query subcommands mirroring the MCP read tools 1:1 in `query.go`).
-  New subcommands register in the `commands` slice in `main.go` — dispatch, the
+  Discovery, download and import use `pipeline.Discover`, `StreamSpecList` and fixed worker pools. New subcommands register in the `commands` slice in `main.go` — dispatch, the
   usage line and the shell completion scripts are all generated from it
 - `internal/converter/docx/` — DOCX → Markdown parser; `internal/converter/pipeline/` — streaming download + convert worker pool
-- `internal/db/` — SQLite schema, queries, FTS5
+- `internal/db/` — SQLite schema, queries, FTS5; `SearchAll` interleaves clause/OpenAPI results with global pagination
+- `internal/dump/` — bounded offline PCAP/PCAPNG analysis via tshark; capture bytes are transient and must never reach caches/DB/logs
 - `internal/versionstore/` — on-demand cache of spec versions not in the prebuilt database
 - `internal/tdoc/` — locating, downloading and converting meeting documents (TDocs); `internal/tdocstore/` — their on-demand cache; `internal/ondemand/` — the detached single-flight fetch helper both stores share
 - `internal/tools/` — MCP tool handlers; `internal/web/` — web viewer (reads through the same `tools.Source`, so it is version-aware)
@@ -174,3 +175,12 @@ make e2e                  # Playwright suite for web viewer JS behavior (CI job 
   `internal/testutil.DownloadTestZip(t, url)` for FTP integration tests
   (auto-skipped in `-short` mode)
 - CI (`.github/workflows/ci.yml`): build, vet, gofmt, golangci-lint, `go test -race`
+
+## Capture handling
+
+`analyze_dump` accepts base64 bytes; HTTP `POST /analyze-dump` accepts raw
+PCAP/PCAPNG under the existing bearer middleware. Both use a private temporary
+workspace removed before return. CLI `analyze-dump` also deletes the named input
+file. Never add capture caches or upload IDs. `tshark -n -r` must stay offline;
+limits are in `internal/dump`. Transport/client attachment retention is outside
+the service's control. No live capture privileges are required.

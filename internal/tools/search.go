@@ -11,10 +11,8 @@ import (
 )
 
 type SearchInput struct {
-	Query string `json:"query" jsonschema:"required,FTS5 query string: AND/OR/NOT (AMF AND authentication), a double-quoted phrase (\"service based interface\"), a prefix (handov*), a column filter (title:authentication or content:handover) or proximity (NEAR(AMF UE, 5)). Hyphenated or dotted terms like IMS-AKA and 38.101 are auto-quoted. After a positive term, -term excludes it (AMF -SMF), same as NOT; an exclusion cannot begin a query or follow AND/OR."`
-	// Deprecated: use SpecIDs instead. Ignored when SpecIDs is non-empty.
-	SpecID  string   `json:"spec_id,omitempty" jsonschema:"Limit search to a single specification (e.g. TS 23.501). Ignored when spec_ids is provided."`
-	SpecIDs []string `json:"spec_ids,omitempty" jsonschema:"Limit search to one or more specifications (e.g. [\"TS 23.501\", \"TS 23.502\"]). Takes precedence over spec_id."`
+	Query   string   `json:"query" jsonschema:"required,FTS5 query string: AND/OR/NOT (AMF AND authentication), a double-quoted phrase (\"service based interface\"), a prefix (handov*), a column filter (title:authentication or content:handover) or proximity (NEAR(AMF UE, 5)). Hyphenated or dotted terms like IMS-AKA and 38.101 are auto-quoted. After a positive term, -term excludes it (AMF -SMF), same as NOT; an exclusion cannot begin a query or follow AND/OR."`
+	SpecIDs []string `json:"spec_ids,omitempty" jsonschema:"Limit search to one or more specifications (e.g. [\"TS 23.501\", \"TS 23.502\"])."`
 	Limit   int      `json:"limit,omitempty" jsonschema:"Maximum number of results per page (default: 10, max: 200)"`
 	Offset  int      `json:"offset,omitempty" jsonschema:"Number of results to skip for pagination (default: 0). Combine with total_count in the response to page through all matches."`
 }
@@ -35,17 +33,12 @@ func HandleSearch(d *db.DB) func(ctx context.Context, req *mcp.CallToolRequest, 
 			limit = db.DefaultSearchLimit
 		}
 
-		specIDs := input.SpecIDs
-		if len(specIDs) == 0 && input.SpecID != "" {
-			specIDs = []string{input.SpecID}
-		}
-
 		offset := input.Offset
 		if offset < 0 {
 			offset = 0
 		}
 
-		results, err := d.Search(ctx, input.Query, specIDs, limit, offset)
+		results, err := d.Search(ctx, input.Query, input.SpecIDs, limit, offset)
 		if err != nil {
 			return errorResult(fmt.Sprintf("search failed: %v", err)), nil, nil
 		}

@@ -196,6 +196,10 @@ combined.
 To run on Cloud Run, see `cloudbuild.yaml` (build + push + deploy) and
 `service.yaml` (Cloud Run service spec).
 
+Local server upgrade instructions for version **0.2.0** (Linux/systemd):
+[Обновление локального сервера](docs/UPDATING.md). Check the installed binary
+with `3gpp-mcp --version`.
+
 ## Tools
 
 Every tool below also has a CLI twin (`list_specs` → `3gpp-mcp list-specs`, and
@@ -248,6 +252,8 @@ database, so:
 
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
+| `search_all` | Search all specifications: clause text and OpenAPI together | `query` (required), `spec_ids`, `limit`, `offset` |
+| `analyze_dump` | Local PCAP/PCAPNG analysis and related specification search | `content_base64` (required), `query` (optional) |
 | `search` | Full-text search across all specs | `query` (required), `spec_ids` (optional), `limit`, `offset` |
 
 The `search` tool supports [SQLite FTS5](https://www.sqlite.org/fts5.html) query syntax:
@@ -529,8 +535,7 @@ The version cache is a separate SQLite file, so the main database stays
 read-only and is never polluted with extra versions. The meeting document
 cache is a third file, bounded and evicted the same way; `--no-fetch` disables
 both. When the cache cannot be
-created — a read-only or ephemeral filesystem, such as the `scratch`-based
-container image — the server logs a warning and runs with on-demand fetching
+created — for example on a read-only filesystem — the server logs a warning and runs with on-demand fetching
 disabled; everything else keeps working. Cached versions are evicted
 least-recently-used once the size limit is exceeded.
 
@@ -548,7 +553,7 @@ Download and import specifications into the database (recommended for initial se
 | `--latest` | Select every spec at its latest version (use when no other selector is given) | `false` |
 | `--spec` | Process a specific spec (e.g. `23.501`) | |
 | `--series` | Filter by series, comma-separated (e.g. `23,29`) | |
-| `--workers` | Number of parallel workers | NumCPU |
+| `--workers` | Download/convert worker count (`0` = auto, at least 8) | `0` |
 | `--convert-doc` | Convert `.doc` files to `.docx` using LibreOffice | `false` |
 | `--convert-image` | Convert EMF/WMF images to PNG using LibreOffice | `false` |
 | `--spec-list` | Read the spec list from a file instead of scraping the archive (a selector is still required) | |
@@ -563,6 +568,82 @@ selector filters them.
 `--release` and `--max-release` differ in what happens to a spec that has no
 version in the named release: `--release 19` drops it, `--max-release 19` keeps
 it at its newest version below the cap. They cannot be combined.
+
+### Unified search and local capture analysis
+
+Use `search_all` (CLI: `search-all`) when the relevant specification or content
+kind is unknown. It searches both clause text and OpenAPI definitions across
+all indexed specifications in one call. Results include `source`, `spec_id` and
+either a section number/version or an API name/definition, with a single
+`total_count`, `limit` and `offset`. The independently ranked indexes alternate
+in the result list so clause matches cannot bury all API matches. A missing
+OpenAPI index produces a warning while clause results remain available.
+Use terms, quoted phrases and boolean operators common to both indexes;
+column filters such as `title:` or `body:` belong to the specialized tools.
+Archived versions and TDocs are outside this search corpus. RFCs referenced
+in clauses are searchable as text; this repository does not index RFC bodies.
+
+```bash
+3gpp-mcp search-all --db data/3gpp.db 'NFProfile OR authentication'
+3gpp-mcp search-all --db data/3gpp.db --limit 20 --offset 20 NGAP
+```
+
+`analyze_dump` accepts model-supplied capture bytes as `content_base64`.
+A client that can read an uploaded attachment passes its base64-encoded bytes;
+the server does not fetch remote URLs or accept server filesystem paths from
+MCP callers. For larger captures, the HTTP transport also accepts a raw binary
+body at `POST /analyze-dump?query=NGAP`, under the same bearer authentication as
+MCP. This returns the analysis directly, with no persistent upload ID:
+
+```bash
+curl --fail-with-body -H "Authorization: Bearer $THREEGPP_MCP_BEARER_TOKEN" \
+  -H 'Content-Type: application/octet-stream' \
+  --data-binary @capture.pcapng http://localhost:8080/analyze-dump
+```
+
+The server runs `tshark` locally in offline mode, with address resolution off.
+It reports protocol counts, TCP retransmissions/resets, capture gaps, malformed
+packets and up to 50 decoded packet summaries (including anomalous packets),
+then uses the unified search for related specifications.
+An optional `query` overrides the query derived from detected protocol names.
+These observations help the model investigate a trace; they do not prove
+standards compliance, and encrypted payloads require prior decryption.
+
+Install the Wireshark CLI (`tshark`) on the host; the Docker runtime includes
+it. No live capture privileges are needed. Each analysis is limited to 64 MiB,
+10,000 packets and 60 seconds, with at most two simultaneous dissectors. A
+packet-limit flag reports possible truncation. Capture files use a private
+temporary directory and are deleted before the result returns, including on
+errors and cancellation. Neither captures nor payloads enter the database,
+cache or application logs. HTTP results use `Cache-Control: no-store`.
+An abrupt process kill or host failure can bypass cleanup; use an ephemeral
+`TMPDIR` (for example a container tmpfs) when crash-time retention matters.
+The caller controls retention in its own attachment/chat system and local
+upload file; the HTTP/MCP service cannot delete the caller's copy.
+
+The CLI accepts a local capture or raw bytes on stdin. **A named input file
+is deleted on success or failure**; stdin has no original file to delete:
+
+```bash
+3gpp-mcp analyze-dump --db data/3gpp.db capture.pcapng
+3gpp-mcp analyze-dump --db data/3gpp.db --query 'NAS OR NGAP' - < capture.pcap
+```
+
+`build`, `download` and `update` now stream complete per-spec version listings
+through bounded worker queues: discovery continues while other specs are being
+downloaded, converted and stored. `--scrape-workers` controls each discovery
+pool and `--workers` controls build/update workers (`--parallel` for download).
+Zero selects at least eight workers, or the CPU count when larger. Latest-version
+selection happens before enqueueing each spec; SQLite writes remain serialized.
+Only complete listings are cached. Discovery failure exits build/download with
+an error; update retains its previous behavior of preserving specs in failed
+directories and applying updates from successfully read directories. Build may
+have imported specs before a discovery failure; derived indexes are refreshed
+or invalidated before returning. Update uses a separate working copy.
+
+The deprecated `search.spec_id` argument has been removed; pass
+`spec_ids: ["TS 23.501"]` instead. Specialized search tools remain available
+for their index-specific filters.
 
 ### Other commands
 
@@ -586,7 +667,7 @@ spec.
 ### Query commands
 
 The query commands (`list-specs`, `list-versions`, `get-toc`, `get-section`,
-`get-asn1`, `compare-versions`, `search`, `list-openapi`, `get-openapi`,
+`get-asn1`, `compare-versions`, `search`, `search-all`, `list-openapi`, `get-openapi`,
 `search-openapi`, `get-references`, `list-images`, `get-image`,
 `list-meetings`, `list-tdocs`, `get-tdoc`, `get-meeting-report`) mirror the
 MCP read tools 1:1, so

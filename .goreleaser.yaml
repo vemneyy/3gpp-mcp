@@ -8,7 +8,9 @@ before:
     - go mod tidy
 
 builds:
-  - main: ./...
+  - main: ./cmd/3gpp-mcp
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
     env:
       - CGO_ENABLED=0
     goos:

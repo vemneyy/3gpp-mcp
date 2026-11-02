@@ -7,4 +7,5 @@ Type=oneshot
 User=3gpp-mcp
 Group=3gpp-mcp
 WorkingDirectory=/var/lib/3gpp-mcp
+Environment=XDG_CACHE_HOME=/var/lib/3gpp-mcp/cache
 ExecStart=/usr/local/bin/3gpp-mcp update --db /var/lib/3gpp-mcp/3gpp.db --convert-doc

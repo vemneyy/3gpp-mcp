@@ -40,16 +40,16 @@ RUN if [ "${RELEASE}" = "latest" ] || [ -z "${RELEASE}" ]; then \
     --scrape-workers 4 \
     && sqlite3 /3gpp.db 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;'
 
-# 3) Final image: just the binary, the baked-in database, and CA certificates
-#    (needed for the HTTPS archive listing behind list_versions). On-demand
-#    fetching of versions not in the prebuilt DB does NOT work out of the box:
-#    it needs a writable cache and temp directory, which scratch lacks. To
-#    enable it, mount a writable volume and set HOME (or XDG_CACHE_HOME) and
-#    TMPDIR to point into it.
-FROM scratch
-COPY --from=db-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+# 3) Runtime includes the offline Wireshark dissector for PCAP/PCAPNG uploads.
+# Capture processing needs a writable temporary directory; the service runs as
+# an unprivileged user and never invokes live capture or dumpcap.
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=go-builder /3gpp-mcp /3gpp-mcp
 COPY --from=db-builder /3gpp.db /3gpp.db
+ENV XDG_CACHE_HOME=/tmp/3gpp-mcp-cache
 USER 65532:65532
 ENTRYPOINT ["/3gpp-mcp"]
 CMD ["serve", "--db", "/3gpp.db"]

@@ -285,6 +285,20 @@ func (e *PartialSpecListError) Error() string {
 // from one that is silently missing specs. A cancelled context is reported as
 // ctx.Err() rather than as a partial list.
 func FetchSpecList(ctx context.Context, client *http.Client, seriesFilter []string, useCache bool, scrapeConcurrency int) ([]string, error) {
+	return streamSpecList(ctx, client, seriesFilter, useCache, scrapeConcurrency, nil)
+}
+
+// StreamSpecList emits complete per-spec version lists as soon as they are
+// discovered. emit is serialized and may block to apply backpressure. A partial
+// listing is never cached and is returned as an error, even after some emissions.
+func StreamSpecList(ctx context.Context, client *http.Client, seriesFilter []string, useCache bool, workers int, emit func([]string) error) error {
+	_, err := streamSpecList(ctx, client, seriesFilter, useCache, workers, emit)
+	return err
+}
+
+func streamSpecList(ctx context.Context, client *http.Client, seriesFilter []string, useCache bool, scrapeConcurrency int, emit func([]string) error) ([]string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -296,6 +310,21 @@ func FetchSpecList(ctx context.Context, client *http.Client, seriesFilter []stri
 	cacheKey := CacheKey("speclist", seriesFilter...)
 	if useCache {
 		if cached, _ := LoadCache(cacheKey, defaultCacheTTL); cached != nil {
+			if emit != nil {
+				groups := make(map[string][]string)
+				for _, entry := range cached {
+					key := entry[:strings.LastIndex(entry, "/")+1]
+					groups[key] = append(groups[key], entry)
+				}
+				for _, group := range groups {
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
+					if err := emit(group); err != nil {
+						return nil, err
+					}
+				}
+			}
 			return cached, nil
 		}
 	}
@@ -322,7 +351,7 @@ func FetchSpecList(ctx context.Context, client *http.Client, seriesFilter []stri
 		}
 		if len(seriesFilter) > 0 {
 			m := seriesDirRE.FindStringSubmatch(name)
-			if !contains(seriesFilter, m[1]) {
+			if !slices.Contains(seriesFilter, m[1]) {
 				continue
 			}
 		}
@@ -332,105 +361,103 @@ func FetchSpecList(ctx context.Context, client *http.Client, seriesFilter []stri
 
 	log.Printf("Found %d series", len(seriesDirs))
 
-	// Level 2: Get spec directories per series (parallel)
-	type specPair struct {
-		seriesDir string
-		specDir   string
-	}
-	var allSpecPairs []specPair
-	var mu sync.Mutex
-	var wg sync.WaitGroup
+	// Series discovery and version discovery run concurrently in fixed pools.
+	type specPair struct{ seriesDir, specDir string }
+	seriesJobs := make(chan string)
+	specJobs := make(chan specPair, scrapeConcurrency)
+	batches := make(chan []string, scrapeConcurrency)
+	var seriesWG, specWG sync.WaitGroup
 	var fetchFailures atomic.Int64
-	sem := make(chan struct{}, scrapeConcurrency)
-
-	for _, sd := range seriesDirs {
-		sd := sd
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			// A page with spec directories is a listing; a page without
-			// them counts as a listing only if it carries the listing UI's
-			// own sort anchors — then it is a genuinely empty series, like
-			// 47_series (issue #211). Anything else is an unusable
-			// response, same as a failed fetch.
-			html, err := fetchPageRetry(ctx, client, baseURL+sd+"/", func(html string) error {
-				links := extractLinks(html)
-				if !slices.ContainsFunc(links, specDirRE.MatchString) && !hasListingChrome(links) {
-					return fmt.Errorf("listing contains no spec directories")
+	for range scrapeConcurrency {
+		seriesWG.Go(func() {
+			for sd := range seriesJobs {
+				html, err := fetchPageRetry(ctx, client, baseURL+sd+"/", func(html string) error {
+					links := extractLinks(html)
+					if !slices.ContainsFunc(links, specDirRE.MatchString) && !hasListingChrome(links) {
+						return fmt.Errorf("listing contains no spec directories")
+					}
+					return nil
+				})
+				if err != nil {
+					log.Printf("Failed to fetch %s: %v", sd, err)
+					fetchFailures.Add(1)
+					continue
 				}
-				return nil
-			})
-			if err != nil {
-				log.Printf("Failed to fetch %s: %v", sd, err)
-				fetchFailures.Add(1)
+				seen := make(map[string]bool)
+				for _, name := range extractLinks(html) {
+					if specDirRE.MatchString(name) && !seen[name] {
+						seen[name] = true
+						select {
+						case specJobs <- specPair{sd, name}:
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
+			}
+		})
+		specWG.Go(func() {
+			for pair := range specJobs {
+				html, err := fetchPageRetry(ctx, client, baseURL+pair.seriesDir+"/"+pair.specDir+"/", func(html string) error {
+					links := extractLinks(html)
+					if !slices.ContainsFunc(links, isZipName) && !hasListingChrome(links) {
+						return fmt.Errorf("listing contains no .zip entries")
+					}
+					return nil
+				})
+				if err != nil {
+					log.Printf("Failed to fetch %s/%s: %v", pair.seriesDir, pair.specDir, err)
+					fetchFailures.Add(1)
+					continue
+				}
+				var zips []string
+				for _, name := range extractLinks(html) {
+					if isZipName(name) {
+						zips = append(zips, pair.seriesDir+"/"+pair.specDir+"/"+name)
+					}
+				}
+				select {
+				case batches <- zips:
+				case <-ctx.Done():
+					return
+				}
+			}
+		})
+	}
+	go func() {
+		defer close(seriesJobs)
+		for _, sd := range seriesDirs {
+			select {
+			case seriesJobs <- sd:
+			case <-ctx.Done():
 				return
 			}
-			var specDirs []string
-			for _, name := range extractLinks(html) {
-				if specDirRE.MatchString(name) {
-					specDirs = append(specDirs, name)
-				}
-			}
-			mu.Lock()
-			for _, name := range specDirs {
-				allSpecPairs = append(allSpecPairs, specPair{sd, name})
-			}
-			log.Printf("%s: %d specs", sd, len(specDirs))
-			mu.Unlock()
-		}()
-	}
-	wg.Wait()
-
-	// Level 3: Get zip files per spec (parallel with bounded concurrency)
-	log.Printf("Fetching zip listings for %d specs...", len(allSpecPairs))
+		}
+	}()
+	go func() { seriesWG.Wait(); close(specJobs); specWG.Wait(); close(batches) }()
 	var entries []string
-
-	for _, pair := range allSpecPairs {
-		pair := pair
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			// Same rule as the series level: a page with zip entries is a
-			// listing, a page with the sort anchors but no entries is a
-			// genuinely empty directory — seven exist in the archive,
-			// 00_series/00.02 among them (issue #211) — and contributes
-			// nothing without failing the build. Anything else, including
-			// a block page that happens to carry unrelated links, retries
-			// like a failed fetch.
-			html, err := fetchPageRetry(ctx, client, baseURL+pair.seriesDir+"/"+pair.specDir+"/", func(html string) error {
-				links := extractLinks(html)
-				if !slices.ContainsFunc(links, isZipName) && !hasListingChrome(links) {
-					return fmt.Errorf("listing contains no .zip entries")
-				}
-				return nil
-			})
-			if err != nil {
-				log.Printf("Failed to fetch %s/%s: %v", pair.seriesDir, pair.specDir, err)
-				fetchFailures.Add(1)
-				return
-			}
-			var zips []string
-			for _, name := range extractLinks(html) {
-				if isZipName(name) {
-					zips = append(zips, pair.seriesDir+"/"+pair.specDir+"/"+name)
-				}
-			}
-			if len(zips) == 0 {
-				log.Printf("%s/%s: empty spec directory (no zip entries); skipping", pair.seriesDir, pair.specDir)
-			}
-			mu.Lock()
+	var emitErr error
+	discovered := 0
+	for zips := range batches {
+		discovered += len(zips)
+		if emit == nil || useCache {
 			entries = append(entries, zips...)
-			mu.Unlock()
-		}()
+		}
+		if emit != nil && emitErr == nil {
+			emitErr = emit(zips)
+			if emitErr != nil {
+				cancel()
+			}
+		}
 	}
-	wg.Wait()
+	if emitErr != nil {
+		return entries, emitErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
-	log.Printf("Total: %d spec versions found", len(entries))
+	log.Printf("Total: %d spec versions found", discovered)
 
 	// A list missing the specs whose listings failed to fetch must not be
 	// cached: every build within the TTL would silently skip them. The caller
@@ -500,7 +527,7 @@ func FilterSpecs(specs []*SpecVersion, f SpecFilter) []*SpecVersion {
 		if f.MaxRelease > 0 && s.Release > f.MaxRelease {
 			continue
 		}
-		if len(f.Series) > 0 && !contains(f.Series, s.Series) {
+		if len(f.Series) > 0 && !slices.Contains(f.Series, s.Series) {
 			continue
 		}
 		if f.SpecID != "" {
@@ -658,13 +685,4 @@ func extractLinks(html string) []string {
 		names = append(names, link)
 	}
 	return names
-}
-
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
 }
