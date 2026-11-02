@@ -196,5 +196,6 @@ failure can leave a partial DB; rerun with `--resume` and keep the server stoppe
 until indexing and finalization succeed. `internal/buildinfo.Version` is the
 shared default version; executable `main.version` variables remain overridable
 with ldflags. `NewPDFServer` must expose `search_all` and `analyze_dump`; Docker
-includes tshark and needs the ephemeral `/tmp` mount in Compose. Release binaries
-are GitHub assets, not tracked files under `bin/`.
+includes tshark and needs the ephemeral `/tmp` mount in Compose. Binary downloads
+are on the `binaries-0.2.0` distribution branch; source branch `work` has no
+tracked files under `bin/`.

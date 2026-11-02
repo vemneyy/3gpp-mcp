@@ -1,6 +1,6 @@
 # Version 0.2.0: host indexer and Docker MCP
 
-Use `make build-indexer` for the standalone Linux indexer and `docker compose up --build -d` for the server. See [обновление локального сервера](docs/UPDATING.md) for the host-indexer/Docker workflow. Both executables support `--version`. Binary release assets are published separately from source code.
+Use `make build-indexer` for the standalone Linux indexer and `docker compose up --build -d` for the server. See [обновление локального сервера](docs/UPDATING.md) for the host-indexer/Docker workflow. Both executables support `--version`. Binary downloads are published separately in the [`binaries-0.2.0`](https://github.com/vemneyy/3gpp-mcp/tree/binaries-0.2.0) distribution branch.
 
 # ETSI PDF indexing and MCP server
 

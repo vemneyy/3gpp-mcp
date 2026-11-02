@@ -19,20 +19,21 @@ make build-indexer
 ```
 
 Для сборки нужен Go не ниже версии в `go.mod`. Вместо сборки можно скачать
-готовый статический бинарник из GitHub release `work-0.2.0`:
+готовый статический бинарник из отдельной ветки `binaries-0.2.0`:
 
 ```bash
 mkdir -p bin
-gh release download work-0.2.0 --repo vemneyy/3gpp-mcp --dir bin \
-  --pattern '3gpp-index_0.2.0_linux_amd64' --pattern SHA256SUMS
+curl --fail --location https://github.com/vemneyy/3gpp-mcp/raw/refs/heads/binaries-0.2.0/3gpp-index_0.2.0_linux_amd64 -o bin/3gpp-index_0.2.0_linux_amd64
+curl --fail --location https://github.com/vemneyy/3gpp-mcp/raw/refs/heads/binaries-0.2.0/SHA256SUMS -o bin/SHA256SUMS
 (cd bin && sha256sum --ignore-missing -c SHA256SUMS)
 chmod +x bin/3gpp-index_0.2.0_linux_amd64
 cp bin/3gpp-index_0.2.0_linux_amd64 bin/3gpp-index
 ```
 
-Для ARM64 скачайте asset с суффиксом `linux_arm64`. Даже готовому бинарнику
+Для ARM64 скачайте файл с суффиксом `linux_arm64`. Даже готовому бинарнику
 нужен `pdftotext` из Poppler для ETSI PDF; для индексации только RFC он не нужен.
-Бинарники и база не хранятся в исходниках Git.
+Бинарники опубликованы отдельно от исходников в ветке `binaries-0.2.0`;
+в исходной ветке `work` нет отслеживаемых файлов в `bin/`.
 
 ## Обновить только MCP-сервер
 
