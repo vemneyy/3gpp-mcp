@@ -268,6 +268,9 @@ func (c *crawler) store(ctx context.Context, d document) error {
 			return e
 		}
 	}
+	if err = enrichDocument(ctx, tx, id); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 func compareVersion(a, b string) int {
@@ -324,7 +327,7 @@ func run() error {
 	dbPath := flag.String("db", "data/explorer.db", "output SQLite database")
 	source := flag.String("source", "", "ETSI specification directory or PDF (default: full 3GPP/GSM ETSI catalog)")
 	mcp := flag.String("mcp-db", "", "optional existing MCP SQLite database: restrict to its specs")
-	migrate := flag.Bool("migrate", false, "upgrade existing local database to schema v2, without downloading PDFs, then exit")
+	migrate := flag.Bool("migrate", false, "upgrade existing local database to schema v3, without downloading PDFs, then exit")
 	workers := flag.Int("workers", 4, "parallel specification downloads (1..16)")
 	flag.Parse()
 	if *workers < 1 || *workers > 16 {
@@ -357,8 +360,8 @@ func run() error {
 		if err = db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sections'").Scan(&exists); err != nil {
 			return err
 		}
-		if version < 2 && exists > 0 {
-			backup := fmt.Sprintf("%s.pre-v2-%d.db", *dbPath, time.Now().UnixNano())
+		if version < 3 && exists > 0 {
+			backup := fmt.Sprintf("%s.pre-v3-%d.db", *dbPath, time.Now().UnixNano())
 			if _, err = db.ExecContext(ctx, "VACUUM INTO ?", backup); err != nil {
 				return fmt.Errorf("backup before migration: %w", err)
 			}
@@ -369,7 +372,7 @@ func run() error {
 		return err
 	}
 	if *migrate {
-		log.Print("Database schema v2 ready; no downloads performed")
+		log.Print("Database schema v3 ready; no downloads performed")
 		return nil
 	}
 

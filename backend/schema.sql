@@ -35,4 +35,34 @@ CREATE TRIGGER IF NOT EXISTS postings_ad AFTER DELETE ON postings BEGIN
  UPDATE term_stats SET section_count=section_count-1 WHERE term=old.term;
  DELETE FROM term_stats WHERE term=old.term AND section_count=0;
 END;
-PRAGMA user_version=2;
+
+CREATE TABLE IF NOT EXISTS document_search (
+ document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+ title_norm TEXT NOT NULL, spec_compact TEXT NOT NULL, etsi_number TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS document_compact ON document_search(spec_compact);
+CREATE INDEX IF NOT EXISTS document_etsi ON document_search(etsi_number);
+CREATE TABLE IF NOT EXISTS document_postings (
+ term TEXT NOT NULL, document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+ hits INTEGER NOT NULL, PRIMARY KEY(term,document_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS document_postings_document ON document_postings(document_id);
+CREATE TABLE IF NOT EXISTS section_features (
+ section_id INTEGER PRIMARY KEY REFERENCES sections(id) ON DELETE CASCADE,
+ kind TEXT NOT NULL, body_length INTEGER NOT NULL, title_length INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS glossary (
+ id INTEGER PRIMARY KEY,
+ document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+ section_id INTEGER NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+ term TEXT NOT NULL, term_norm TEXT NOT NULL, definition TEXT NOT NULL, definition_norm TEXT NOT NULL,
+ kind TEXT NOT NULL, UNIQUE(section_id,term_norm,kind)
+);
+CREATE INDEX IF NOT EXISTS glossary_term ON glossary(term_norm);
+CREATE INDEX IF NOT EXISTS glossary_document ON glossary(document_id);
+PRAGMA user_version=3;
+CREATE TABLE IF NOT EXISTS glossary_postings (
+ term TEXT NOT NULL, glossary_id INTEGER NOT NULL REFERENCES glossary(id) ON DELETE CASCADE,
+ PRIMARY KEY(term,glossary_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS glossary_postings_entry ON glossary_postings(glossary_id);

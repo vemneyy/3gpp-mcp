@@ -13,14 +13,14 @@ func ensureSchema(ctx context.Context, db *sql.DB, migrate bool) error {
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 2 {
+	if version > 3 {
 		return fmt.Errorf("database schema %d is newer than this binary", version)
 	}
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sections'").Scan(&exists); err != nil {
 		return err
 	}
 	schema, _ := assets.ReadFile("schema.sql")
-	if exists == 0 || version == 2 {
+	if exists == 0 || version == 3 {
 		if _, err := db.ExecContext(ctx, string(schema)); err != nil {
 			return err
 		}
@@ -41,24 +41,34 @@ func ensureSchema(ctx context.Context, db *sql.DB, migrate bool) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS sections_ai;
+	if version < 2 {
+		if _, err = tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS sections_ai;
  DROP TRIGGER IF EXISTS sections_ad; DROP TRIGGER IF EXISTS sections_au;
  DROP TABLE IF EXISTS search_vocab; DROP TABLE IF EXISTS search;
  ALTER TABLE sections RENAME TO legacy_sections;`); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, string(schema)); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO sections(id,document_id,number,title,page)
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, string(schema)); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO sections(id,document_id,number,title,page)
  SELECT id,document_id,number,title,page FROM legacy_sections;
  INSERT INTO section_text(section_id,body) SELECT id,body FROM legacy_sections;
  INSERT INTO postings(term,section_id,document_id,title_hits,body_hits)
  SELECT t.term,t.section_id,s.document_id,t.title_hits,t.body_hits
  FROM term_counts t JOIN legacy_sections s ON s.id=t.section_id;
  DROP TABLE term_counts; DROP TABLE legacy_sections;`); err != nil {
+			return err
+		}
+	} else {
+		if _, err = tx.ExecContext(ctx, string(schema)); err != nil {
+			return err
+		}
+	}
+	if err = rebuildEnrichment(ctx, tx); err != nil {
 		return err
 	}
+
 	var violations int
 	if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM pragma_foreign_key_check").Scan(&violations); err != nil {
 		return err

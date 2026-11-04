@@ -4,13 +4,14 @@
 <body>
 <header><h1><a href="/">ETSI — 3GPP &amp; GSM Explorer</a></h1></header>
 {% if error %}<p role="alert">{{ error }}</p>{% else %}
-<main><form action="/" method="get" role="search">
-<p><label for="q">Search terms</label><br><input type="search" id="q" name="q" value="{{ q }}" maxlength="256" size="45"></p>
-<label for="previews">Previews per document</label> <input id="previews" name="previews" type="number" min="1" max="50" value="{{ previews }}">
+<main><p><a href="/">Specifications</a> · <a href="/glossary">Glossary</a></p><form action="{{ '/glossary' if glossary_mode else '/' }}" method="get" role="search">
+<p><label for="q">{{ 'Term or abbreviation' if glossary_mode else 'Specification number, title or term' }}</label><br><input type="search" id="q" name="q" value="{{ q }}" maxlength="256" size="45"></p>
+{% if not glossary_mode %}<label for="previews">Previews per document</label> <input id="previews" name="previews" type="number" min="1" max="50" value="{{ previews }}">{% endif %}
 <button type="submit">Search</button></form>
-<hr><h2>{{ total }} document(s){% if q %} for “{{ q }}”{% endif %}</h2>
-{% for doc in documents %}<article><h3><a href="{{ doc.url }}">{{ doc.spec }} — {{ doc.title }}</a></h3><p>Version {{ doc.version }} · {{ doc.family|upper }}{% if doc.matching_sections is defined %} · {{ doc.matching_sections }} matching sections{% endif %}</p>
-{% if q %}{% for section in doc.sections %}<section><h4><a href="{{ section.url }}">{{ section.number }} {{ section.title }}</a> <small>(p. {{ section.page }})</small></h4><p>{{ section.preview }}</p></section>{% endfor %}
+<hr>{% if glossary_mode %}<h2>{{ glossary_total }} glossary entries</h2>{% else %}<h2>{{ total }} document(s){% if q %} for “{{ q }}”{% endif %}</h2>{% endif %}
+{% if glossary_entries %}<section aria-label="Glossary">{% if not glossary_mode %}<h3>Glossary</h3>{% endif %}<dl>{% for entry in glossary_entries %}<dt><strong>{{ entry.term }}</strong> ({{ entry.kind }})</dt><dd>{{ entry.definition }} <a href="{{ entry.url }}">{{ entry.spec }} §{{ entry.number }}</a></dd>{% endfor %}</dl>{% if not glossary_mode and glossary_total > 5 %}<p><a href="/glossary?q={{ q|urlencode }}">All glossary matches ({{ glossary_total }})</a></p>{% endif %}</section>{% endif %}
+{% for doc in documents %}<article><h3><a href="{{ doc.url }}">{{ doc.spec }} — {{ doc.title }}</a></h3><p>Version {{ doc.version }} · {{ doc.family|upper }}{% if doc.match_reason %} · {{ doc.match_reason }}{% endif %}{% if doc.matching_sections is defined %} · {{ doc.matching_sections }} matching sections{% endif %}</p>
+{% if q %}{% if not doc.sections %}<p><a href="{{ doc.toc_url }}">Table of contents</a></p>{% endif %}{% for section in doc.sections %}<section><h4><a href="{{ section.url }}">{{ section.number }} {{ section.title }}</a> <small>(p. {{ section.page }})</small></h4><p>{{ section.preview }}</p></section>{% endfor %}
 {% elif toc %}<ul>{% for section in doc.sections %}<li><a href="{{ section.url }}">{{ section.number }} {{ section.title }}</a> (p. {{ section.page }})</li>{% endfor %}</ul><p>{% if doc.toc_previous %}<a href="{{ doc.toc_previous }}">Previous sections</a> · {% endif %}{% if doc.toc_next %}<a href="{{ doc.toc_next }}">Next sections</a>{% endif %}</p>
 {% else %}<p><a href="{{ doc.toc_url }}">Table of contents</a></p>{% endif %}
 {% if doc.previous_sections_url %}<p><a href="{{ doc.previous_sections_url }}">Previous matching sections</a></p>{% endif %}{% if doc.next_sections_url %}<p><a href="{{ doc.next_sections_url }}">More matching sections in {{ doc.spec }}</a></p>{% endif %}</article>{% endfor %}

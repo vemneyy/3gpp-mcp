@@ -1,9 +1,7 @@
 """Read-only server-rendered explorer; metadata, text and postings are separate."""
-import heapq
 import os
 import re
 import sqlite3
-import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlencode
@@ -16,14 +14,10 @@ ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = os.environ.get('EXPLORER_DB', str(ROOT / 'data/explorer.db'))
 app = FastAPI(title='ETSI 3GPP Explorer')
 templates = Jinja2Templates(directory=str(ROOT / 'frontend'))
+from backend.text import normalize
+from backend.search_engine import retrieve, glossary_search, FORMS, TECH, TECH_NAMES, STOP
+
 DOC_COLUMNS = 'id,spec,family,series,title,version,url'
-
-
-def normalize(text):
-    text = unicodedata.normalize('NFKD', text)
-    return ' '.join(''.join(c.lower() if c.isalpha() or c.isdecimal() else
-                           '' if unicodedata.category(c).startswith('M') else ' '
-                           for c in text).split())
 
 
 @contextmanager
@@ -33,7 +27,7 @@ def database():
     try:
         db.execute('PRAGMA query_only=ON')
         db.execute('BEGIN')
-        if db.execute('PRAGMA user_version').fetchone()[0] != 2:
+        if db.execute('PRAGMA user_version').fetchone()[0] != 3:
             raise sqlite3.DatabaseError('Run etsi-indexer --db <path> --migrate to upgrade the index.')
         yield db
     finally:
@@ -41,31 +35,34 @@ def database():
 
 
 def preview(body, terms):
-    match = re.search('|'.join(re.escape(t) for t in terms), body, re.I) if terms else None
-    start = max(0, match.start() - 100) if match else 0
-    return ('…' if start else '') + body[start:start + 360].strip() + ('…' if start + 360 < len(body) else '')
+    # Word boundaries prevent an attach query from centering on "detach".
+    expanded=set()
+    for word in terms:
+        expanded.update(FORMS.get(word,(word,)))
+        technology=TECH_NAMES.get(word,word)
+        if technology in TECH:expanded.update(TECH[technology])
+    if not expanded:return body[:360].strip()
+    pattern=re.compile(r'(?<![^\W_])(?:'+'|'.join(re.escape(t) for t in sorted(expanded,key=len,reverse=True))+r')(?![^\W_])',re.I)
+    matches=list(pattern.finditer(body))
+    if not matches:return body[:360].strip()
+    # Choose the smallest window covering as many distinct query words as fit;
+    # walk linearly rather than rereading a long section for every occurrence.
+    best_start,best_coverage,best_span=matches[0].start(),-1,10**9
+    left=0;counts={}
+    for right,match in enumerate(matches):
+        word=match.group().lower();counts[word]=counts.get(word,0)+1
+        while match.end()-matches[left].start()>260 and left<right:
+            old=matches[left].group().lower();counts[old]-=1
+            if not counts[old]:del counts[old]
+            left+=1
+        span=match.end()-matches[left].start()
+        if len(counts)>best_coverage or len(counts)==best_coverage and span<best_span:
+            best_start,best_coverage,best_span=matches[left].start(),len(counts),span
+    start=max(0,best_start-70)
+    return ('…' if start else '')+body[start:start+360].strip()+('…' if start+360<len(body) else '')
 
 
-def candidates(db, terms, filters, args):
-    """One covering range scan of the rarest term, indexed point probes for others.
-
-    CROSS JOIN fixes the driver: SQLite must not start with a very common term.
-    Bodies, section headings and normalized text never enter this query.
-    """
-    stats = {r['term']: r['section_count'] for r in db.execute(
-        'SELECT term,section_count FROM term_stats WHERE term IN (' + ','.join('?' for _ in terms) + ')', terms)}
-    if len(stats) != len(terms):
-        return ()
-    ordered = sorted(terms, key=lambda t: (stats[t], t))
-    joins = ' '.join(f'CROSS JOIN postings p{i} ON p{i}.term=? AND p{i}.section_id=p0.section_id' for i in range(1, len(ordered)))
-    title = '+'.join(f'p{i}.title_hits' for i in range(len(ordered)))
-    body = '+'.join(f'p{i}.body_hits' for i in range(len(ordered)))
-    condition = ' AND p0.document_id IN (SELECT d.id FROM documents d WHERE ' + filters + ')' if filters else ''
-    sql = f'SELECT p0.section_id,p0.document_id,{title} AS title_hits,{body} AS body_hits FROM postings p0 {joins} WHERE p0.term=?{condition}'
-    return db.execute(sql, [*ordered[1:], ordered[0], *args])
-
-
-def lookup(q='', family='', series='', previews=3, page=1, spec='', section_page=1, toc=False):
+def lookup(q='', family='', series='', previews=1, page=1, spec='', section_page=1, toc=False):
     terms = list(dict.fromkeys(normalize(q).split()))
     if len(terms) > 16:
         raise ValueError('Use at most 16 search words.')
@@ -88,51 +85,8 @@ def lookup(q='', family='', series='', previews=3, page=1, spec='', section_page
                     doc['toc_previous'] = f'/document/{doc["spec"]}?page={section_page-1}' if section_page>1 else None
                     doc['toc_next'] = f'/document/{doc["spec"]}?page={section_page+1}' if section_page*100<doc['total_sections'] else None
         else:
-            # Stream numeric matches once. Keep only top K sections per document;
-            # neither repeated SQL ranking nor full-text scans are necessary.
-            groups = {}
-            keep = section_page * previews
-            for row in candidates(db, terms, filters, args):
-                sid, did, title_hits, body_hits = row
-                key = (int(title_hits > 0), body_hits, title_hits, -sid)
-                group = groups.setdefault(did, {'count': 0, 'best': key, 'heap': []})
-                group['count'] += 1
-                group['best'] = max(group['best'], key)
-                item = (key, sid, title_hits, body_hits)
-                if len(group['heap']) < keep:
-                    heapq.heappush(group['heap'], item)
-                elif item > group['heap'][0]:
-                    heapq.heapreplace(group['heap'], item)
-            total = len(groups)
-            # Lightweight titles only, once, so ties sort by specification number.
-            specs = {r['id']: r['spec'] for r in db.execute('SELECT id,spec FROM documents')} if groups else {}
-            ordered = sorted(groups, key=lambda did: (*(-v for v in groups[did]['best'][:3]), specs[did]))
-            ids = ordered[(page-1)*25:page*25]
-            metadata = {r['id']: dict(r) for r in db.execute('SELECT ' + DOC_COLUMNS + ' FROM documents WHERE id IN (' + ','.join('?' for _ in ids) + ')', ids)} if ids else {}
-            docs = []
-            selected = []
-            for did in ids:
-                group = groups[did]
-                doc = metadata[did]
-                doc['matching_sections'] = group['count']
-                doc['title_hits'], doc['body_hits'] = group['best'][2], group['best'][1]
-                chosen = sorted(group['heap'], reverse=True)[(section_page-1)*previews:section_page*previews]
-                doc['sections'] = []
-                for rank, (_, sid, th, bh) in enumerate(chosen, (section_page-1)*previews+1):
-                    doc['sections'].append(dict(id=sid, title_hits=th, body_hits=bh, rank=rank))
-                    selected.append(sid)
-                docs.append(doc)
-            # At most 25 * previews bodies, point lookups in the separate text table.
-            contents = {}
-            for offset in range(0, len(selected), 500):
-                batch = selected[offset:offset+500]
-                contents.update({r['id']: dict(r) for r in db.execute(
-                    'SELECT s.id,s.number,s.title,s.page,t.body FROM sections s JOIN section_text t ON t.section_id=s.id WHERE s.id IN (' + ','.join('?' for _ in batch) + ')', batch)})
-            for doc in docs:
-                for section in doc['sections']:
-                    content = contents[section['id']]
-                    section.update({k: v for k, v in content.items() if k != 'body'})
-                    section['preview'] = preview(content['body'], terms)
+            docs,total=retrieve(db,q,filters,args,previews,page,section_page,preview)
+        glossary_entries,glossary_total=glossary_search(db,q,limit=5) if terms and not set(terms).issubset(STOP) and not re.search(r'\b\d{2}\.\d{2,3}\b|\b\d{5,6}\b',q) else ([],0)
         for doc in docs:
             doc['toc_url'] = '/document/' + doc['spec']
             params = dict(q=q, family=family, series=series, previews=previews, spec=doc['spec'])
@@ -140,7 +94,7 @@ def lookup(q='', family='', series='', previews=3, page=1, spec='', section_page
             doc['previous_sections_url'] = '/?' + urlencode(dict(params, section_page=section_page-1)) if terms and section_page>1 else None
             for section in doc['sections']:
                 section['url'] = doc['url'] + '#page=' + str(section['page']+1)
-        return dict(documents=docs, total=total, catalog=[], q=q, family=family, series=series, previews=previews, page=page, spec=spec, section_page=section_page, toc=toc, pages=(total+24)//25)
+        return dict(documents=docs, total=total, catalog=[], glossary_entries=glossary_entries, glossary_total=glossary_total, glossary_mode=False, q=q, family=family, series=series, previews=previews, page=page, spec=spec, section_page=section_page, toc=toc, pages=(total+24)//25)
 
 
 @app.get('/styles.css', include_in_schema=False)
@@ -153,7 +107,7 @@ def health():
     try:
         with database() as db:
             db.execute('SELECT id FROM documents LIMIT 1').fetchone()
-        return {'status': 'ok', 'schema': 2}
+        return {'status': 'ok', 'schema': 3}
     except sqlite3.Error:
         return JSONResponse({'status':'index unavailable; create or migrate the database'}, status_code=503)
 
@@ -161,6 +115,24 @@ def health():
 def render(request, result):
     result['page_url'] = lambda n: '/?' + urlencode(dict(q=result['q'], family=result['family'], series=result['series'], previews=result['previews'], page=n, spec=result['spec'], section_page=result['section_page']))
     return templates.TemplateResponse(request=request, name='index.html', context=result)
+
+
+@app.get('/glossary', response_class=HTMLResponse)
+@app.get('/api/glossary')
+def glossary(request: Request, q: str = Query('',max_length=256), page: int = Query(1,ge=1,le=100000)):
+    try:
+        with database() as db:
+            entries,total=glossary_search(db,q,page)
+        if request.url.path.startswith('/api/'):
+            return dict(entries=entries,total=total,page=page,pages=(total+49)//50)
+        result=dict(documents=[],glossary_entries=entries,glossary_total=total,glossary_mode=True,q=q,total=total,
+                    page=page,pages=(total+49)//50,previews=1,spec='',family='',series='',section_page=1,toc=False)
+        result['page_url']=lambda n:'/glossary?'+urlencode(dict(q=q,page=n))
+        return templates.TemplateResponse(request=request,name='index.html',context=result)
+    except ValueError as exc:
+        return JSONResponse({'detail':str(exc)},status_code=422)
+    except sqlite3.Error:
+        return JSONResponse({'detail':'Glossary unavailable; run indexer --migrate.'},status_code=503)
 
 
 @app.get('/document/{spec}', response_class=HTMLResponse)
@@ -177,7 +149,7 @@ def document(request: Request, spec: str, page: int = Query(1, ge=1, le=100000))
 @app.get('/', response_class=HTMLResponse)
 @app.get('/index.html', response_class=HTMLResponse)
 @app.get('/api/search')
-def search(request: Request, q: str = Query('', max_length=256), family: str = Query('', pattern='^(|3gpp|gsm)$'), series: str = Query('', pattern=r'^(|[0-9]{2})$'), previews: int = Query(3, ge=1, le=50), page: int = Query(1, ge=1, le=100000), spec: str = Query('', max_length=32, pattern=r'^(|[0-9]{2}\.[0-9]{2,3}(-[0-9]+)?)$'), section_page: int = Query(1, ge=1, le=100000)):
+def search(request: Request, q: str = Query('', max_length=256), family: str = Query('', pattern='^(|3gpp|gsm)$'), series: str = Query('', pattern=r'^(|[0-9]{2})$'), previews: int = Query(1, ge=1, le=50), page: int = Query(1, ge=1, le=100000), spec: str = Query('', max_length=32, pattern=r'^(|[0-9]{2}\.[0-9]{2,3}(-[0-9]+)?)$'), section_page: int = Query(1, ge=1, le=100000)):
     try:
         result = lookup(q, family, series, previews, page, spec, section_page)
     except ValueError as exc:

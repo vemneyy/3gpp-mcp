@@ -18,6 +18,11 @@ def client(tmp_path, monkeypatch):
     for row in db.execute('SELECT s.id,s.title,t.body FROM sections s JOIN section_text t ON t.section_id=s.id').fetchall():
         a,b=Counter(module.normalize(row[1]).split()),Counter(module.normalize(row[2]).split())
         db.executemany('INSERT INTO postings VALUES(?,?,?,?,?)',[(t,row[0],1,a[t],b[t]) for t in a.keys()|b.keys()])
+    for row in db.execute('SELECT id,spec,title,url FROM documents').fetchall():
+        db.execute('INSERT INTO document_search VALUES(?,?,?,?)',(row[0],module.normalize(row[2]),row[1].replace('.',''),'123501' if row[0]==1 else '100940'))
+        db.executemany('INSERT INTO document_postings VALUES(?,?,?)',[(t,row[0],n) for t,n in Counter(module.normalize(row[2]).split()).items()])
+    for row in db.execute('SELECT s.id,s.title,t.body FROM sections s JOIN section_text t ON t.section_id=s.id').fetchall():
+        db.execute('INSERT INTO section_features VALUES(?,?,?,?)',(row[0],'content',len(module.normalize(row[2]).split()),len(module.normalize(row[1]).split())))
     db.commit();db.close()
     monkeypatch.setattr(module,'DB_PATH',str(path))
     return TestClient(module.app)
@@ -84,7 +89,7 @@ def test_search_reads_candidates_once_and_only_selected_text(client,monkeypatch)
     monkeypatch.setattr(module,'database',traced)
     r=client.get('/api/search?q=pdu-session&previews=1')
     assert r.status_code==200
-    candidate_sql=[s for s in statements if 'FROM postings p0' in s]
+    candidate_sql=[s for s in statements if 'WITH driver AS' in s]
     assert len(candidate_sql)==1
     text_sql=[s for s in statements if 'JOIN section_text' in s]
     assert len(text_sql)==1 and 'IN (1)' in text_sql[0]
@@ -101,8 +106,8 @@ def test_rarest_word_drives_intersection(client,monkeypatch):
             yield db
     monkeypatch.setattr(module,'database',traced)
     assert client.get('/api/search?q=pdu+one').json()['total']==1
-    sql=next(s for s in statements if 'FROM postings p0' in s)
-    assert "WHERE p0.term='one'" in sql
+    sql=next(s for s in statements if 'WITH driver AS' in s)
+    assert "WHERE term='one'" in sql
 
 
 def test_table_of_contents_pagination(client):
@@ -114,3 +119,15 @@ def test_table_of_contents_pagination(client):
     assert 'GSM heading 99' in first and 'GSM heading 100' not in first
     assert 'GSM heading 100' in second and 'GSM heading 99' not in second
     assert '/document/04.08?page=2' in first
+
+
+def test_specification_identifiers_and_title(client):
+    for query in ['23.501','TS 23.501','3GPP TS 23.501','23501','ETSI TS 123 501','123501']:
+        result=client.get('/api/search',params={'q':query}).json()
+        assert result['total']==1,query
+        assert result['documents'][0]['spec']=='23.501'
+        assert result['documents'][0]['sections']==[]
+    assert client.get('/api/search?q=Architecture').json()['documents'][0]['match_reason']=='Specification title'
+    assert client.get('/api/search?q=99.999').json()['total']==0
+    assert client.get('/api/search?q=23.501+pdu').json()['total']==1
+    assert len(client.get('/api/search?q=pdu').json()['documents'][0]['sections'])==1
