@@ -319,7 +319,7 @@ func (c *crawler) index(ctx context.Context, address string) error {
 }
 func run() error {
 	dbPath := flag.String("db", "data/explorer.db", "output SQLite database")
-	source := flag.String("source", "", "ETSI specification directory or PDF (default: full TS/TR catalog)")
+	source := flag.String("source", "", "ETSI specification directory or PDF (default: full 3GPP/GSM ETSI catalog)")
 	mcp := flag.String("mcp-db", "", "optional existing MCP SQLite database: restrict to its specs")
 	workers := flag.Int("workers", 4, "parallel specification downloads (1..16)")
 	flag.Parse()

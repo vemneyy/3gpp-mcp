@@ -1,0 +1,25 @@
+services:
+  backend:
+    image: etsi-explorer-backend:local
+    platform: linux/amd64
+    build:
+      context: .
+    ports:
+      - "127.0.0.1:10808:8000"
+    environment:
+      EXPLORER_DB: /data/explorer.db
+    volumes:
+      - type: bind
+        source: ./data
+        target: /data
+        # SQLite mode=ro still needs writable WAL/SHM bookkeeping for live updates.
+        read_only: false
+    user: "${EXPLORER_UID:-1000}:${EXPLORER_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

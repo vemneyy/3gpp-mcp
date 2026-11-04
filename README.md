@@ -138,3 +138,66 @@ ETSI_TEST_TEXT=/tmp/spec.txt go test ./indexer -run TestRealPDF -v
 должны совпадать (проверяется тестом; одна нужна для Go embed).
 Полный каталог ETSI при разработке не скачивался; реальные интеграционные
 прогоны выполнены для TS 23.501 V19.9.0 и GSM 04.08 V7.21.0.
+
+## Готовый Linux amd64 бинарник
+
+`dist/etsi-indexer-linux-amd64` — статический ELF x86-64, CGO отключён,
+GOAMD64=v1; Go и libc на целевом сервере не нужны. Проверка:
+
+```sh
+cd dist
+sha256sum -c SHA256SUMS
+chmod +x etsi-indexer-linux-amd64
+cd ..
+sudo apt-get install poppler-utils
+./dist/etsi-indexer-linux-amd64 --db data/explorer.db --workers 4
+```
+
+Для пересборки: `make build-amd64`. Контрольные суммы лежат в `dist/SHA256SUMS`.
+
+## Docker backend на 127.0.0.1:10808
+
+Docker-образ содержит FastAPI и frontend; индексатор запускается отдельно
+на хосте. База сохраняется в `./data/explorer.db`, не внутри образа. После
+заполнения базы:
+
+```sh
+EXPLORER_UID=$(id -u) EXPLORER_GID=$(id -g) docker compose up -d --build
+curl http://127.0.0.1:10808/health
+# Страница: http://127.0.0.1:10808/index.html
+# API: http://127.0.0.1:10808/api/search?q=pdu-session
+```
+
+Compose собирает Linux amd64-образ `etsi-explorer-backend:local`. Только
+локальный интерфейс хоста публикует порт: `127.0.0.1:10808:8000`.
+В контейнере Uvicorn слушает `0.0.0.0:8000`, два worker-процесса.
+Без базы контейнер отвечает 503 и healthcheck показывает unhealthy до её
+создания; не генерирует пустую БД. Индексация может продолжаться на хосте
+параллельно с поиском; база работает в режиме WAL.
+
+Каталог data/ монтируется с записью для служебных SQLite `-wal`/`-shm` файлов:
+подключения FastAPI остаются строго `mode=ro` + `query_only`, изменение данных
+через backend невозможно. Это обеспечивает чтение активной WAL-базы без
+небезопасного `immutable=1`. UID/GID контейнера должны совпадать с владельцем
+файлов индексатора (по умолчанию 1000:1000, настраиваются переменными выше).
+Корневая ФС контейнера read-only. При использовании `--db` с другим именем
+измените `EXPLORER_DB` в compose.yaml.
+
+Остановка: `docker compose down` — данные в ./data сохраняются.
+
+В окружении с корпоративным CA передайте его только на этапе сборки:
+
+```sh
+docker build --secret id=proxy_ca,src=/path/to/ca-bundle.pem -t etsi-explorer-backend:local .
+docker compose up -d --no-build
+```
+
+Готовый экспортированный образ также можно загрузить без сборки:
+
+```sh
+docker load -i etsi-explorer-backend-linux-amd64.tar.gz
+EXPLORER_UID=$(id -u) EXPLORER_GID=$(id -g) docker compose up -d --no-build
+```
+
+Проверка образа выполнена на Linux amd64: HTTP 200 для `/health`,
+`/index.html`, поиска по двум спецификациям и чтения свежей WAL-базы.
