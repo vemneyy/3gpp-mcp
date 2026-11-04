@@ -1,4 +1,5 @@
-"""Read-only, server-rendered ETSI explorer. No script is shipped to the browser."""
+"""Read-only server-rendered explorer; metadata, text and postings are separate."""
+import heapq
 import os
 import re
 import sqlite3
@@ -15,11 +16,10 @@ ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = os.environ.get('EXPLORER_DB', str(ROOT / 'data/explorer.db'))
 app = FastAPI(title='ETSI 3GPP Explorer')
 templates = Jinja2Templates(directory=str(ROOT / 'frontend'))
+DOC_COLUMNS = 'id,spec,family,series,title,version,url'
 
 
 def normalize(text):
-    # Shared contract with Go: NFKD, remove combining marks, lowercase letters,
-    # retain numbers; every other character becomes a word boundary.
     text = unicodedata.normalize('NFKD', text)
     return ' '.join(''.join(c.lower() if c.isalpha() or c.isdecimal() else
                            '' if unicodedata.category(c).startswith('M') else ' '
@@ -30,76 +30,117 @@ def normalize(text):
 def database():
     db = sqlite3.connect(Path(DB_PATH).resolve().as_uri() + '?mode=ro', uri=True, timeout=5)
     db.row_factory = sqlite3.Row
-    db.execute('PRAGMA query_only=ON')
-    db.execute('BEGIN')  # One consistent WAL snapshot for all queries in this response.
     try:
+        db.execute('PRAGMA query_only=ON')
+        db.execute('BEGIN')
+        if db.execute('PRAGMA user_version').fetchone()[0] != 2:
+            raise sqlite3.DatabaseError('Run etsi-indexer --db <path> --migrate to upgrade the index.')
         yield db
     finally:
         db.close()
 
 
 def preview(body, terms):
-    # Bound work and response size. Show original text around the first match.
-    pattern = re.compile('|'.join(re.escape(t) for t in terms), re.I)
-    match = pattern.search(body) if terms else None
+    match = re.search('|'.join(re.escape(t) for t in terms), body, re.I) if terms else None
     start = max(0, match.start() - 100) if match else 0
     return ('…' if start else '') + body[start:start + 360].strip() + ('…' if start + 360 < len(body) else '')
 
 
-def lookup(q='', family='', series='', previews=3, page=1, spec='', section_page=1):
+def candidates(db, terms, filters, args):
+    """One covering range scan of the rarest term, indexed point probes for others.
+
+    CROSS JOIN fixes the driver: SQLite must not start with a very common term.
+    Bodies, section headings and normalized text never enter this query.
+    """
+    stats = {r['term']: r['section_count'] for r in db.execute(
+        'SELECT term,section_count FROM term_stats WHERE term IN (' + ','.join('?' for _ in terms) + ')', terms)}
+    if len(stats) != len(terms):
+        return ()
+    ordered = sorted(terms, key=lambda t: (stats[t], t))
+    joins = ' '.join(f'CROSS JOIN postings p{i} ON p{i}.term=? AND p{i}.section_id=p0.section_id' for i in range(1, len(ordered)))
+    title = '+'.join(f'p{i}.title_hits' for i in range(len(ordered)))
+    body = '+'.join(f'p{i}.body_hits' for i in range(len(ordered)))
+    condition = ' AND p0.document_id IN (SELECT d.id FROM documents d WHERE ' + filters + ')' if filters else ''
+    sql = f'SELECT p0.section_id,p0.document_id,{title} AS title_hits,{body} AS body_hits FROM postings p0 {joins} WHERE p0.term=?{condition}'
+    return db.execute(sql, [*ordered[1:], ordered[0], *args])
+
+
+def lookup(q='', family='', series='', previews=3, page=1, spec='', section_page=1, toc=False):
     terms = list(dict.fromkeys(normalize(q).split()))
     if len(terms) > 16:
         raise ValueError('Use at most 16 search words.')
-    filters, args = [], []
+    conditions, args = [], []
     for field, value in [('family', family), ('series', series), ('spec', spec)]:
         if value:
-            filters.append(f'd.{field}=?')
+            conditions.append(f'd.{field}=?')
             args.append(value)
-    where = ' AND '.join(filters) or '1'
+    filters = ' AND '.join(conditions)
     with database() as db:
-        catalog = [dict(r) for r in db.execute('SELECT family,series,count(*) AS count FROM documents GROUP BY family,series ORDER BY family,series')]
         if not terms:
+            where = filters or '1'
             total = db.execute(f'SELECT count(*) FROM documents d WHERE {where}', args).fetchone()[0]
-            docs = [dict(r) for r in db.execute(f'SELECT d.* FROM documents d WHERE {where} ORDER BY spec LIMIT 25 OFFSET ?', [*args, (page-1)*25])]
+            docs = [dict(r) for r in db.execute(f'SELECT {DOC_COLUMNS} FROM documents d WHERE {where} ORDER BY spec LIMIT 25 OFFSET ?', [*args, (page-1)*25])]
             for doc in docs:
-                doc['sections'] = [dict(r) for r in db.execute('SELECT number,title,page FROM sections WHERE document_id=? ORDER BY id', [doc['id']])]
+                doc['sections'] = []
+                if toc:
+                    doc['total_sections'] = db.execute('SELECT count(*) FROM sections WHERE document_id=?', [doc['id']]).fetchone()[0]
+                    doc['sections'] = [dict(r) for r in db.execute('SELECT number,title,page FROM sections WHERE document_id=? ORDER BY id LIMIT 100 OFFSET ?', [doc['id'], (section_page-1)*100])]
+                    doc['toc_previous'] = f'/document/{doc["spec"]}?page={section_page-1}' if section_page>1 else None
+                    doc['toc_next'] = f'/document/{doc["spec"]}?page={section_page+1}' if section_page*100<doc['total_sections'] else None
         else:
-            # Never accept FTS syntax from the user. All words must match the same section.
-            expression = ' AND '.join('"' + t + '"' for t in terms)
-            placeholders = ','.join('?' for _ in terms)
-            cte = f'''WITH counts AS MATERIALIZED (
-              SELECT section_id AS doc,sum(title_hits) AS title_hits,sum(body_hits) AS body_hits
-              FROM term_counts WHERE term IN ({placeholders}) GROUP BY section_id), hits AS MATERIALIZED (
-              SELECT s.id,s.document_id,c.title_hits,c.body_hits
-              FROM search JOIN sections s ON s.id=search.rowid
-              JOIN counts c ON c.doc=s.id JOIN documents d ON d.id=s.document_id
-              WHERE search MATCH ? AND {where}), ranked AS (
-              SELECT *,row_number() OVER(PARTITION BY document_id ORDER BY (title_hits>0) DESC,body_hits DESC,title_hits DESC,id) AS rank
-              FROM hits)'''
-            params = [*terms, expression, *args]
-            total = db.execute(cte + ' SELECT count(DISTINCT document_id) FROM hits', params).fetchone()[0]
-            docs = [dict(r) for r in db.execute(cte + ''' SELECT d.*,r.title_hits,r.body_hits,
-              (SELECT count(*) FROM hits h WHERE h.document_id=d.id) AS matching_sections
-              FROM ranked r JOIN documents d ON d.id=r.document_id WHERE rank=1
-              ORDER BY (r.title_hits>0) DESC,r.body_hits DESC,r.title_hits DESC,d.spec LIMIT 25 OFFSET ?''', [*params,(page-1)*25])]
-            ids = [d['id'] for d in docs]
-            sections = {}
-            if ids:
-                rows = db.execute(cte + ' SELECT s.*,r.title_hits,r.body_hits,r.rank FROM ranked r JOIN sections s ON s.id=r.id WHERE r.rank>? AND r.rank<=? AND r.document_id IN (' + ','.join('?' for _ in ids) + ') ORDER BY r.document_id,r.rank', [*params,(section_page-1)*previews,section_page*previews,*ids])
-                for row in rows:
-                    section = dict(row)
-                    section['preview'] = preview(section.pop('body'), terms)
-                    section.pop('body_norm'); section.pop('title_norm')
-                    sections.setdefault(section['document_id'], []).append(section)
+            # Stream numeric matches once. Keep only top K sections per document;
+            # neither repeated SQL ranking nor full-text scans are necessary.
+            groups = {}
+            keep = section_page * previews
+            for row in candidates(db, terms, filters, args):
+                sid, did, title_hits, body_hits = row
+                key = (int(title_hits > 0), body_hits, title_hits, -sid)
+                group = groups.setdefault(did, {'count': 0, 'best': key, 'heap': []})
+                group['count'] += 1
+                group['best'] = max(group['best'], key)
+                item = (key, sid, title_hits, body_hits)
+                if len(group['heap']) < keep:
+                    heapq.heappush(group['heap'], item)
+                elif item > group['heap'][0]:
+                    heapq.heapreplace(group['heap'], item)
+            total = len(groups)
+            # Lightweight titles only, once, so ties sort by specification number.
+            specs = {r['id']: r['spec'] for r in db.execute('SELECT id,spec FROM documents')} if groups else {}
+            ordered = sorted(groups, key=lambda did: (*(-v for v in groups[did]['best'][:3]), specs[did]))
+            ids = ordered[(page-1)*25:page*25]
+            metadata = {r['id']: dict(r) for r in db.execute('SELECT ' + DOC_COLUMNS + ' FROM documents WHERE id IN (' + ','.join('?' for _ in ids) + ')', ids)} if ids else {}
+            docs = []
+            selected = []
+            for did in ids:
+                group = groups[did]
+                doc = metadata[did]
+                doc['matching_sections'] = group['count']
+                doc['title_hits'], doc['body_hits'] = group['best'][2], group['best'][1]
+                chosen = sorted(group['heap'], reverse=True)[(section_page-1)*previews:section_page*previews]
+                doc['sections'] = []
+                for rank, (_, sid, th, bh) in enumerate(chosen, (section_page-1)*previews+1):
+                    doc['sections'].append(dict(id=sid, title_hits=th, body_hits=bh, rank=rank))
+                    selected.append(sid)
+                docs.append(doc)
+            # At most 25 * previews bodies, point lookups in the separate text table.
+            contents = {}
+            for offset in range(0, len(selected), 500):
+                batch = selected[offset:offset+500]
+                contents.update({r['id']: dict(r) for r in db.execute(
+                    'SELECT s.id,s.number,s.title,s.page,t.body FROM sections s JOIN section_text t ON t.section_id=s.id WHERE s.id IN (' + ','.join('?' for _ in batch) + ')', batch)})
             for doc in docs:
-                doc['sections'] = sections.get(doc['id'], [])
+                for section in doc['sections']:
+                    content = contents[section['id']]
+                    section.update({k: v for k, v in content.items() if k != 'body'})
+                    section['preview'] = preview(content['body'], terms)
         for doc in docs:
-            doc.pop('sha256', None)
-            doc['next_sections_url'] = '/?' + urlencode(dict(q=q, family=family, series=series, previews=previews, spec=doc['spec'], section_page=section_page+1)) if doc.get('matching_sections',0)>section_page*previews else None
-            doc['previous_sections_url'] = '/?' + urlencode(dict(q=q, family=family, series=series, previews=previews, spec=doc['spec'], section_page=section_page-1)) if section_page>1 else None
-            for s in doc['sections']:
-                s['url'] = doc['url'] + '#page=' + str(s['page'] + 1)
-        return dict(documents=docs, total=total, catalog=catalog, q=q, family=family, series=series, previews=previews, page=page, spec=spec, section_page=section_page, pages=(total+24)//25)
+            doc['toc_url'] = '/document/' + doc['spec']
+            params = dict(q=q, family=family, series=series, previews=previews, spec=doc['spec'])
+            doc['next_sections_url'] = '/?' + urlencode(dict(params, section_page=section_page+1)) if doc.get('matching_sections',0)>section_page*previews else None
+            doc['previous_sections_url'] = '/?' + urlencode(dict(params, section_page=section_page-1)) if terms and section_page>1 else None
+            for section in doc['sections']:
+                section['url'] = doc['url'] + '#page=' + str(section['page']+1)
+        return dict(documents=docs, total=total, catalog=[], q=q, family=family, series=series, previews=previews, page=page, spec=spec, section_page=section_page, toc=toc, pages=(total+24)//25)
 
 
 @app.get('/styles.css', include_in_schema=False)
@@ -112,9 +153,25 @@ def health():
     try:
         with database() as db:
             db.execute('SELECT id FROM documents LIMIT 1').fetchone()
-        return {'status': 'ok'}
+        return {'status': 'ok', 'schema': 2}
     except sqlite3.Error:
-        return JSONResponse({'status':'index unavailable'}, status_code=503)
+        return JSONResponse({'status':'index unavailable; create or migrate the database'}, status_code=503)
+
+
+def render(request, result):
+    result['page_url'] = lambda n: '/?' + urlencode(dict(q=result['q'], family=result['family'], series=result['series'], previews=result['previews'], page=n, spec=result['spec'], section_page=result['section_page']))
+    return templates.TemplateResponse(request=request, name='index.html', context=result)
+
+
+@app.get('/document/{spec}', response_class=HTMLResponse)
+def document(request: Request, spec: str, page: int = Query(1, ge=1, le=100000)):
+    try:
+        result = lookup(spec=spec, toc=True, section_page=page)
+        if not result['documents']:
+            return HTMLResponse('Document not found', status_code=404)
+        return render(request, result)
+    except sqlite3.Error:
+        return JSONResponse({'detail':'Index unavailable; run indexer --migrate.'}, status_code=503)
 
 
 @app.get('/', response_class=HTMLResponse)
@@ -127,9 +184,6 @@ def search(request: Request, q: str = Query('', max_length=256), family: str = Q
         return JSONResponse({'detail': str(exc)}, status_code=422)
     except sqlite3.Error:
         if request.url.path.startswith('/api/'):
-            return JSONResponse({'detail':'Index unavailable; run the indexer.'}, status_code=503)
-        return templates.TemplateResponse(request=request, name='index.html', context={'error':'Index unavailable. Run the indexer first.'}, status_code=503)
-    if request.url.path.startswith('/api/'):
-        return result
-    result['page_url'] = lambda n: '/?' + urlencode(dict(q=q, family=family, series=series, previews=previews, page=n, spec=spec, section_page=section_page))
-    return templates.TemplateResponse(request=request, name='index.html', context=result)
+            return JSONResponse({'detail':'Index unavailable; create or migrate the database with indexer --migrate.'}, status_code=503)
+        return templates.TemplateResponse(request=request, name='index.html', context={'error':'Index unavailable. Create or migrate the database with indexer --migrate.'}, status_code=503)
+    return result if request.url.path.startswith('/api/') else render(request, result)

@@ -1,8 +1,8 @@
 html { color-scheme: light; }
 body { margin: 1.5em; color: #000; background: #fff; font-family: "Times New Roman", serif; }
 a { color: #00e; } a:visited { color: #551a8b; }
-nav { float: left; width: 12em; } main { margin-left: 14em; max-width: 70em; }
+main { max-width: 70em; }
 article { margin: 1.5em 0; } h4 { margin-bottom: .4em; } section p { margin-top: .4em; white-space: pre-line; overflow-wrap: anywhere; }
 input, select, button { font: inherit; max-width: 100%; } input[type=number] { width: 4em; }
 footer { clear: both; padding-top: 1em; } small { font-weight: normal; }
-@media (max-width: 650px) { nav { float: none; width: auto; } nav ul { display: flex; flex-wrap: wrap; gap: 1em 2em; } main { margin-left: 0; } body { margin: 1em; } }
+@media (max-width: 650px) { main { margin-left: 0; } body { margin: 1em; } }

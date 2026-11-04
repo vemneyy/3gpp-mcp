@@ -1,0 +1,91 @@
+# Обновление v1 → v2 на /opt/3gpp-explorer
+
+База v1 несовместима с новым backend до миграции. Остановите старый индексатор
+и backend на время перехода. Nginx и его proxy_pass 127.0.0.1:10808 менять не нужно.
+
+## 1. Остановить прежний индексатор
+
+Если работает в терминале: Ctrl+C. Если запускали через nohup:
+
+```sh
+pgrep -af '[e]tsi-indexer-linux-amd64'
+kill -INT НОМЕР_PID
+```
+
+Дождитесь завершения процесса. Не запускайте старый и новый индексаторы вместе.
+
+## 2. Обновить код и бинарник из Git
+
+```sh
+cd /opt/3gpp-explorer
+docker compose stop backend
+git pull --ff-only origin etsi-3gpp-explorer
+chmod +x dist/etsi-indexer-linux-amd64
+(cd dist && sha256sum -c SHA256SUMS)
+```
+
+Если используете скачанные файлы вместо Git, после остановки backend распакуйте
+`etsi-explorer-v2-sources.tar.gz` поверх каталога проекта и установите бинарник:
+
+```sh
+tar -xzf /path/to/etsi-explorer-v2-sources.tar.gz -C /opt/3gpp-explorer
+mkdir -p /opt/3gpp-explorer/dist
+install -m 755 /path/to/etsi-indexer-linux-amd64-v2 /opt/3gpp-explorer/dist/etsi-indexer-linux-amd64
+```
+
+Архив исходников не содержит базы, окружения .venv, Git-метаданных или бинарника.
+Он не удаляет data/. Контрольная сумма скачанного бинарника — в SHA256SUMS-v2.
+
+## 3. Перенести существующую базу без сети
+
+```sh
+cd /opt/3gpp-explorer
+./dist/etsi-indexer-linux-amd64 --db /opt/3gpp-explorer/data/explorer.db --migrate
+```
+
+Команда автоматически создаёт согласованную копию
+`data/explorer.db.pre-v2-<timestamp>.db` через SQLite VACUUM INTO.
+Затем транзакционно переносит разделы, тексты, частоты и URL, убирает старые
+FTS/нормализованные копии и выполняет VACUUM. Никаких PDF или сетевых запросов.
+Нужен свободный диск под резервную копию и временные таблицы/VACUUM — ориентир
+3–4 размера исходной базы свободного места, точный объём зависит от данных.
+На большой базе миграция может занять время. Не прерывайте её во время VACUUM.
+При ошибке до commit исходная схема остаётся целой; резервная копия сохраняется.
+Повторный --migrate для v2 не создаёт новую резервную копию и повторяет уплотнение.
+
+Если --db был другим, укажите именно используемый файл и сохраните соответствующий
+EXPLORER_DB в compose.yaml. Команда с несуществующим путём завершится ошибкой;
+предварительно проверьте путь: `ls -lh data/explorer.db`.
+
+## 4. Пересобрать и запустить backend
+
+Для показанного сервера, где индексатор работает от root:
+
+```sh
+cd /opt/3gpp-explorer
+EXPLORER_UID=0 EXPLORER_GID=0 docker compose up -d --build
+curl -fsS http://127.0.0.1:10808/health
+curl -fsS 'http://127.0.0.1:10808/api/search?q=pdu-session&previews=2'
+```
+
+Health: `{"status":"ok","schema":2}`. Привязка осталась строго
+127.0.0.1:10808. Если индексатор запускается от другого пользователя, задайте
+его UID/GID. База хранится на хосте в data/, не в Docker-образе.
+
+## 5. Продолжить индексацию при необходимости
+
+```sh
+cd /opt/3gpp-explorer
+nohup ./dist/etsi-indexer-linux-amd64 --db data/explorer.db --workers 4 > data/indexer.log 2>&1 &
+```
+
+Используйте прежний --mcp-db, если раньше ограничивали каталог им. Индексатор
+сохраняет SHA-256 и не конвертирует неизменённые PDF повторно.
+
+## Откат
+
+Остановить новый индексатор и `docker compose stop backend`. Восстановить
+базу из созданной pre-v2-копии при отсутствии открытых подключений; старые
+explorer.db-wal / explorer.db-shm перед восстановлением убрать. Вернуть
+исходники v1 (`efe6441`) и пересобрать Docker backend. Бинарник v1 не открывает
+новую базу v2 корректно; код и база откатываются вместе.

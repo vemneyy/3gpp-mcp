@@ -232,12 +232,15 @@ func (c *crawler) store(ctx context.Context, d document) error {
 	}
 	for _, s := range d.Sections {
 		title, body := normalize(s.Title), normalize(s.Body)
-		r, e := tx.ExecContext(ctx, "INSERT INTO sections(document_id,number,title,body,page,title_norm,body_norm) VALUES(?,?,?,?,?,?,?)", id, s.Number, s.Title, s.Body, s.Page, title, body)
+		r, e := tx.ExecContext(ctx, "INSERT INTO sections(document_id,number,title,page) VALUES(?,?,?,?)", id, s.Number, s.Title, s.Page)
 		if e != nil {
 			return e
 		}
 		sectionID, e := r.LastInsertId()
 		if e != nil {
+			return e
+		}
+		if _, e = tx.ExecContext(ctx, "INSERT INTO section_text(section_id,body) VALUES(?,?)", sectionID, s.Body); e != nil {
 			return e
 		}
 		counts := map[string][2]int{}
@@ -251,12 +254,12 @@ func (c *crawler) store(ctx context.Context, d document) error {
 			v[1]++
 			counts[term] = v
 		}
-		stmt, e := tx.PrepareContext(ctx, "INSERT INTO term_counts(term,section_id,title_hits,body_hits) VALUES(?,?,?,?)")
+		stmt, e := tx.PrepareContext(ctx, "INSERT INTO postings(term,section_id,document_id,title_hits,body_hits) VALUES(?,?,?,?,?)")
 		if e != nil {
 			return e
 		}
 		for term, v := range counts {
-			if _, e = stmt.ExecContext(ctx, term, sectionID, v[0], v[1]); e != nil {
+			if _, e = stmt.ExecContext(ctx, term, sectionID, id, v[0], v[1]); e != nil {
 				stmt.Close()
 				return e
 			}
@@ -321,13 +324,19 @@ func run() error {
 	dbPath := flag.String("db", "data/explorer.db", "output SQLite database")
 	source := flag.String("source", "", "ETSI specification directory or PDF (default: full 3GPP/GSM ETSI catalog)")
 	mcp := flag.String("mcp-db", "", "optional existing MCP SQLite database: restrict to its specs")
+	migrate := flag.Bool("migrate", false, "upgrade existing local database to schema v2, without downloading PDFs, then exit")
 	workers := flag.Int("workers", 4, "parallel specification downloads (1..16)")
 	flag.Parse()
 	if *workers < 1 || *workers > 16 {
 		return fmt.Errorf("workers must be 1..16")
 	}
-	if _, e := exec.LookPath("pdftotext"); e != nil {
+	if _, e := exec.LookPath("pdftotext"); e != nil && !*migrate {
 		return fmt.Errorf("install poppler-utils: %w", e)
+	}
+	if *migrate {
+		if _, err := os.Stat(*dbPath); err != nil {
+			return fmt.Errorf("migration requires an existing database at %s: %w", *dbPath, err)
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -340,10 +349,30 @@ func run() error {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	schema, _ := assets.ReadFile("schema.sql")
-	if _, err = db.ExecContext(ctx, string(schema)); err != nil {
+	if *migrate {
+		var version, exists int
+		if err = db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+			return err
+		}
+		if err = db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sections'").Scan(&exists); err != nil {
+			return err
+		}
+		if version < 2 && exists > 0 {
+			backup := fmt.Sprintf("%s.pre-v2-%d.db", *dbPath, time.Now().UnixNano())
+			if _, err = db.ExecContext(ctx, "VACUUM INTO ?", backup); err != nil {
+				return fmt.Errorf("backup before migration: %w", err)
+			}
+			log.Printf("Consistent pre-migration backup: %s", backup)
+		}
+	}
+	if err = ensureSchema(ctx, db, *migrate); err != nil {
 		return err
 	}
+	if *migrate {
+		log.Print("Database schema v2 ready; no downloads performed")
+		return nil
+	}
+
 	opts := []tlsclient.HttpClientOption{tlsclient.WithClientProfile(profiles.Firefox_135), tlsclient.WithTimeoutSeconds(120)}
 	proxy := os.Getenv("HTTPS_PROXY")
 	if proxy == "" {
@@ -440,7 +469,7 @@ func run() error {
 	}
 	close(queue)
 	wg.Wait()
-	if _, err = db.ExecContext(ctx, "INSERT INTO search(search) VALUES('optimize')"); err != nil {
+	if _, err = db.ExecContext(ctx, "PRAGMA optimize"); err != nil {
 		return err
 	}
 	if len(c.allowed) > 0 {

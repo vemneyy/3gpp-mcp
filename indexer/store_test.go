@@ -24,7 +24,7 @@ func TestAtomicReplacementAndCounts(t *testing.T) {
 		t.Fatal(e)
 	}
 	var title, body int
-	if e = db.QueryRow("SELECT title_hits,body_hits FROM term_counts WHERE term='pdu'").Scan(&title, &body); e != nil || title != 1 || body != 2 {
+	if e = db.QueryRow("SELECT title_hits,body_hits FROM postings WHERE term='pdu'").Scan(&title, &body); e != nil || title != 1 || body != 2 {
 		t.Fatalf("counts %d %d %v", title, body, e)
 	}
 	d.Version = "20.0.0"
@@ -33,10 +33,10 @@ func TestAtomicReplacementAndCounts(t *testing.T) {
 		t.Fatal(e)
 	}
 	var count int
-	if e = db.QueryRow("SELECT count(*) FROM search WHERE search MATCH 'replacement'").Scan(&count); e != nil || count != 1 {
-		t.Fatalf("FTS stale %v %d", e, count)
+	if e = db.QueryRow("SELECT count(*) FROM postings WHERE term='replacement'").Scan(&count); e != nil || count != 1 {
+		t.Fatalf("postings stale %v %d", e, count)
 	}
-	if e = db.QueryRow("SELECT sum(body_hits) FROM term_counts WHERE term='pdu'").Scan(&count); e != nil || count != 0 {
+	if e = db.QueryRow("SELECT sum(body_hits) FROM postings WHERE term='pdu'").Scan(&count); e != nil || count != 0 {
 		t.Fatalf("counts stale %v %d", e, count)
 	}
 	d.Version = "21.0.0"

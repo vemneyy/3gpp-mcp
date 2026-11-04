@@ -13,10 +13,11 @@ def client(tmp_path, monkeypatch):
     db.execute("INSERT INTO documents VALUES(1,'23.501','3gpp','23','Architecture','19.0.0','https://www.etsi.org/deliver/test.pdf','hash')")
     db.execute("INSERT INTO documents VALUES(2,'04.08','gsm','04','GSM','8.0.0','https://www.etsi.org/deliver/gsm.pdf','hash')")
     for i,title,body,page in [(1,'PDU session','one mention',3),(2,'Body only','PDU session PDU session PDU session',4),(3,'Another','pdu session',5),(4,'<script>alert(1)</script>','pdu session',6)]:
-        db.execute('INSERT INTO sections VALUES(?,?,?,?,?,?,?,?)',(i,1,str(i),title,body,page,module.normalize(title),module.normalize(body)))
-    for row in db.execute('SELECT id,title_norm,body_norm FROM sections').fetchall():
-        a,b=Counter(row[1].split()),Counter(row[2].split())
-        db.executemany('INSERT INTO term_counts VALUES(?,?,?,?)',[(t,row[0],a[t],b[t]) for t in a.keys()|b.keys()])
+        db.execute('INSERT INTO sections VALUES(?,?,?,?,?)',(i,1,str(i),title,page))
+        db.execute('INSERT INTO section_text VALUES(?,?)',(i,body))
+    for row in db.execute('SELECT s.id,s.title,t.body FROM sections s JOIN section_text t ON t.section_id=s.id').fetchall():
+        a,b=Counter(module.normalize(row[1]).split()),Counter(module.normalize(row[2]).split())
+        db.executemany('INSERT INTO postings VALUES(?,?,?,?,?)',[(t,row[0],1,a[t],b[t]) for t in a.keys()|b.keys()])
     db.commit();db.close()
     monkeypatch.setattr(module,'DB_PATH',str(path))
     return TestClient(module.app)
@@ -57,3 +58,59 @@ def test_every_section_can_be_reached(client):
     second=client.get('/api/search',params={'q':'pdu','previews':1,'spec':'23.501','section_page':2}).json()['documents'][0]
     assert second['sections'][0]['number']=='2'
     assert second['previous_sections_url']
+
+
+def test_initial_page_is_light_and_toc_is_separate(client):
+    result=client.get('/api/search').json()
+    assert all(not d['sections'] for d in result['documents'])
+    page=client.get('/').text
+    assert 'name="family"' not in page and 'name="series"' not in page
+    assert 'PDF links use' not in page and 'All words must' not in page
+    assert len(page.encode())<5000
+    toc=client.get('/document/23.501')
+    assert toc.status_code==200 and 'PDU session' in toc.text
+    assert client.get('/document/99.999').status_code==404
+
+
+def test_search_reads_candidates_once_and_only_selected_text(client,monkeypatch):
+    from contextlib import contextmanager
+    statements=[]
+    original=module.database
+    @contextmanager
+    def traced():
+        with original() as db:
+            db.set_trace_callback(statements.append)
+            yield db
+    monkeypatch.setattr(module,'database',traced)
+    r=client.get('/api/search?q=pdu-session&previews=1')
+    assert r.status_code==200
+    candidate_sql=[s for s in statements if 'FROM postings p0' in s]
+    assert len(candidate_sql)==1
+    text_sql=[s for s in statements if 'JOIN section_text' in s]
+    assert len(text_sql)==1 and 'IN (1)' in text_sql[0]
+
+
+def test_rarest_word_drives_intersection(client,monkeypatch):
+    from contextlib import contextmanager
+    original=module.database
+    statements=[]
+    @contextmanager
+    def traced():
+        with original() as db:
+            db.set_trace_callback(statements.append)
+            yield db
+    monkeypatch.setattr(module,'database',traced)
+    assert client.get('/api/search?q=pdu+one').json()['total']==1
+    sql=next(s for s in statements if 'FROM postings p0' in s)
+    assert "WHERE p0.term='one'" in sql
+
+
+def test_table_of_contents_pagination(client):
+    db=sqlite3.connect(module.DB_PATH)
+    db.executemany('INSERT INTO sections(id,document_id,number,title,page) VALUES(?,2,?,?,1)',[(100+i,str(i),'GSM heading '+str(i)) for i in range(103)])
+    db.commit();db.close()
+    first=client.get('/document/04.08').text
+    second=client.get('/document/04.08?page=2').text
+    assert 'GSM heading 99' in first and 'GSM heading 100' not in first
+    assert 'GSM heading 100' in second and 'GSM heading 99' not in second
+    assert '/document/04.08?page=2' in first

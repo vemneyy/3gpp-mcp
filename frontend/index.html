@@ -2,19 +2,18 @@
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ETSI — 3GPP &amp; GSM Explorer</title><link rel="stylesheet" href="/styles.css"></head>
 <body>
-<header><h1>ETSI — 3GPP &amp; GSM Explorer</h1><p>Specification index and section search</p></header>
+<header><h1><a href="/">ETSI — 3GPP &amp; GSM Explorer</a></h1></header>
 {% if error %}<p role="alert">{{ error }}</p>{% else %}
-<nav aria-label="Series"><h2>Index</h2>{% for group in ['3gpp','gsm'] %}<h3>{{ '3GPP' if group == '3gpp' else 'GSM' }}</h3><ul>{% for item in catalog if item.family == group %}<li><a href="/?family={{ group }}&amp;series={{ item.series }}">{{ item.series }} series</a> ({{ item.count }})</li>{% else %}<li>No indexed documents</li>{% endfor %}</ul>{% endfor %}</nav>
 <main><form action="/" method="get" role="search">
-{% if spec %}<input type="hidden" name="spec" value="{{ spec }}">{% endif %}
 <p><label for="q">Search terms</label><br><input type="search" id="q" name="q" value="{{ q }}" maxlength="256" size="45"></p>
-<label for="family">Collection</label> <select id="family" name="family">{% for value,label in [('', 'All'), ('3gpp','3GPP'), ('gsm','GSM')] %}<option value="{{ value }}" {% if family == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
-<label for="series">Series</label> <input id="series" name="series" size="2" maxlength="2" pattern="[0-9]{2}" value="{{ series }}">
 <label for="previews">Previews per document</label> <input id="previews" name="previews" type="number" min="1" max="50" value="{{ previews }}">
-<button type="submit">Search</button><p>All words must occur in the same section. Punctuation is ignored. Submit with Enter or Search.</p></form>
+<button type="submit">Search</button></form>
 <hr><h2>{{ total }} document(s){% if q %} for “{{ q }}”{% endif %}</h2>
-{% for doc in documents %}<article><h3><a href="{{ doc.url }}">{{ doc.spec }} — {{ doc.title }}</a></h3><p>Version {{ doc.version }} · {{ doc.family|upper }} · Series {{ doc.series }}{% if doc.matching_sections is defined %} · {{ doc.matching_sections }} matching sections{% endif %}</p>
-{% if q %}{% for section in doc.sections %}<section><h4><a href="{{ section.url }}">{{ section.number }} {{ section.title }}</a> <small>(p. {{ section.page }})</small></h4><p>{{ section.preview }}</p></section>{% endfor %}{% else %}<details><summary>Table of contents ({{ doc.sections|length }})</summary><ul>{% for section in doc.sections %}<li><a href="{{ section.url }}">{{ section.number }} {{ section.title }}</a> (p. {{ section.page }})</li>{% endfor %}</ul></details>{% endif %}{% if doc.previous_sections_url %}<p><a href="{{ doc.previous_sections_url }}">Previous matching sections</a></p>{% endif %}{% if doc.next_sections_url %}<p><a href="{{ doc.next_sections_url }}">More matching sections in {{ doc.spec }}</a></p>{% endif %}</article>{% endfor %}
-<p>{% if page > 1 %}<a href="{{ page_url(page-1) }}">Previous</a> · {% endif %}Page {{ page }} / {{ [pages,1]|max }}{% if page < pages %} · <a href="{{ page_url(page+1) }}">Next</a>{% endif %}</p></main>{% endif %}
-<footer><hr><p>Source: <a href="https://www.etsi.org/deliver/">ETSI deliver</a>. PDF links use printed page + 1.</p></footer>
+{% for doc in documents %}<article><h3><a href="{{ doc.url }}">{{ doc.spec }} — {{ doc.title }}</a></h3><p>Version {{ doc.version }} · {{ doc.family|upper }}{% if doc.matching_sections is defined %} · {{ doc.matching_sections }} matching sections{% endif %}</p>
+{% if q %}{% for section in doc.sections %}<section><h4><a href="{{ section.url }}">{{ section.number }} {{ section.title }}</a> <small>(p. {{ section.page }})</small></h4><p>{{ section.preview }}</p></section>{% endfor %}
+{% elif toc %}<ul>{% for section in doc.sections %}<li><a href="{{ section.url }}">{{ section.number }} {{ section.title }}</a> (p. {{ section.page }})</li>{% endfor %}</ul><p>{% if doc.toc_previous %}<a href="{{ doc.toc_previous }}">Previous sections</a> · {% endif %}{% if doc.toc_next %}<a href="{{ doc.toc_next }}">Next sections</a>{% endif %}</p>
+{% else %}<p><a href="{{ doc.toc_url }}">Table of contents</a></p>{% endif %}
+{% if doc.previous_sections_url %}<p><a href="{{ doc.previous_sections_url }}">Previous matching sections</a></p>{% endif %}{% if doc.next_sections_url %}<p><a href="{{ doc.next_sections_url }}">More matching sections in {{ doc.spec }}</a></p>{% endif %}</article>{% endfor %}
+{% if not toc %}<p>{% if page > 1 %}<a href="{{ page_url(page-1) }}">Previous</a> · {% endif %}Page {{ page }} / {{ [pages,1]|max }}{% if page < pages %} · <a href="{{ page_url(page+1) }}">Next</a>{% endif %}</p>{% endif %}</main>{% endif %}
+<footer><hr><p>Source: <a href="https://www.etsi.org/deliver/">ETSI deliver</a></p></footer>
 </body></html>
