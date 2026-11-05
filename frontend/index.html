@@ -1,20 +1,45 @@
+{% macro highlighted(parts) -%}{% for part in parts %}{% if part.match %}<strong>{{ part.text }}</strong>{% else %}{{ part.text }}{% endif %}{% endfor %}{%- endmacro %}
 <!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ETSI — 3GPP &amp; GSM Explorer</title><link rel="stylesheet" href="/styles.css"></head>
 <body>
 <header><h1><a href="/">ETSI — 3GPP &amp; GSM Explorer</a></h1></header>
 {% if error %}<p role="alert">{{ error }}</p>{% else %}
-<main><p><a href="/">Specifications</a> · <a href="/glossary">Glossary</a></p><form action="{{ '/glossary' if glossary_mode else '/' }}" method="get" role="search">
-<p><label for="q">{{ 'Term or abbreviation' if glossary_mode else 'Specification number, title or term' }}</label><br><input type="search" id="q" name="q" value="{{ q }}" maxlength="256" size="45"></p>
-{% if not glossary_mode %}<label for="previews">Previews per document</label> <input id="previews" name="previews" type="number" min="1" max="50" value="{{ previews }}">{% endif %}
-<button type="submit">Search</button></form>
-<hr>{% if glossary_mode %}<h2>{{ glossary_total }} glossary entries</h2>{% else %}<h2>{{ total }} document(s){% if q %} for “{{ q }}”{% endif %}</h2>{% endif %}
-{% if glossary_entries %}<section aria-label="Glossary">{% if not glossary_mode %}<h3>Glossary</h3>{% endif %}<dl>{% for entry in glossary_entries %}<dt><strong>{{ entry.term }}</strong> ({{ entry.kind }})</dt><dd>{{ entry.definition }} <a href="{{ entry.url }}">{{ entry.spec }} §{{ entry.number }}</a></dd>{% endfor %}</dl>{% if not glossary_mode and glossary_total > 5 %}<p><a href="/glossary?q={{ q|urlencode }}">All glossary matches ({{ glossary_total }})</a></p>{% endif %}</section>{% endif %}
-{% for doc in documents %}<article><h3><a href="{{ doc.url }}">{{ doc.spec }} — {{ doc.title }}</a></h3><p>Version {{ doc.version }} · {{ doc.family|upper }}{% if doc.match_reason %} · {{ doc.match_reason }}{% endif %}{% if doc.matching_sections is defined %} · {{ doc.matching_sections }} matching sections{% endif %}</p>
-{% if q %}{% if not doc.sections %}<p><a href="{{ doc.toc_url }}">Table of contents</a></p>{% endif %}{% for section in doc.sections %}<section><h4><a href="{{ section.url }}">{{ section.number }} {{ section.title }}</a> <small>(p. {{ section.page }})</small></h4><p>{{ section.preview }}</p></section>{% endfor %}
-{% elif toc %}<ul>{% for section in doc.sections %}<li><a href="{{ section.url }}">{{ section.number }} {{ section.title }}</a> (p. {{ section.page }})</li>{% endfor %}</ul><p>{% if doc.toc_previous %}<a href="{{ doc.toc_previous }}">Previous sections</a> · {% endif %}{% if doc.toc_next %}<a href="{{ doc.toc_next }}">Next sections</a>{% endif %}</p>
-{% else %}<p><a href="{{ doc.toc_url }}">Table of contents</a></p>{% endif %}
-{% if doc.previous_sections_url %}<p><a href="{{ doc.previous_sections_url }}">Previous matching sections</a></p>{% endif %}{% if doc.next_sections_url %}<p><a href="{{ doc.next_sections_url }}">More matching sections in {{ doc.spec }}</a></p>{% endif %}</article>{% endfor %}
-{% if not toc %}<p>{% if page > 1 %}<a href="{{ page_url(page-1) }}">Previous</a> · {% endif %}Page {{ page }} / {{ [pages,1]|max }}{% if page < pages %} · <a href="{{ page_url(page+1) }}">Next</a>{% endif %}</p>{% endif %}</main>{% endif %}
+<main>
+<nav aria-label="Collections"><a href="/">Specifications</a> · <a href="/glossary{% if q %}?q={{ q|urlencode }}{% endif %}">Glossary</a></nav>
+<form class="search-form" action="{{ '/glossary' if glossary_mode else '/' }}" method="get" role="search">
+<label for="q">Search for</label>
+<input type="search" id="q" name="q" value="{{ q }}" maxlength="256" size="42">
+<button type="submit">Search</button>
+{% if not glossary_mode and q %}{% for query in within %}<input type="hidden" name="parents" value="{{ query }}">{% endfor %}<input type="hidden" name="parents" value="{{ q }}">
+<label class="refine"><input type="checkbox" name="refine" value="true"{% if within|length>=4 %} disabled title="Clear the current scope to start another refinement"{% endif %}> Search within results</label>{% endif %}
+{% if spec %}<input type="hidden" name="spec" value="{{ spec }}">{% endif %}
+<label for="page_size">Results per page</label>
+<select name="page_size" id="page_size">{% for size in [5,10,20,50,100] %}<option value="{{ size }}"{% if page_size==size %} selected{% endif %}>{{ size }}</option>{% endfor %}{% if page_size not in [5,10,20,50,100] %}<option value="{{ page_size }}" selected>{{ page_size }}</option>{% endif %}</select>
+</form>
+{% if within %}<p class="scope">Within: {% for query in within %}<strong>{{ query }}</strong>{% if not loop.last %} → {% endif %}{% endfor %} · <a href="/?q={{ q|urlencode }}&amp;page_size={{ page_size }}">Search all specifications</a></p>{% endif %}
+{% if spec and not toc %}<p>Specification: {{ spec }} · <a href="/">Clear</a></p>{% endif %}
+{% if not toc %}<p class="result-count"><strong>{{ total }} matched {{ 'glossary entries' if glossary_mode else 'results' }} found.</strong>{% if not glossary_mode and q %} {{ matched_documents }} documents.{% endif %}{% if first %} Showing {{ first }}–{{ last }}.{% endif %}</p>{% endif %}
+{% if glossary_mode %}<dl class="glossary">{% for entry in glossary_entries %}<dt>{{ highlighted(entry.term_parts) }} <small>({{ entry.kind }})</small></dt><dd>{{ highlighted(entry.definition_parts) }}<p><a href="{{ entry.url }}">[PDF] {{ entry.spec }} › §{{ entry.number }}</a></p></dd>{% endfor %}</dl>{% endif %}
+{% for doc in documents %}
+<article class="result">
+<h2 class="result-title"><a href="{{ doc.result_url }}">[PDF] {{ highlighted(doc.spec_parts) }} — {{ highlighted(doc.title_parts) }}</a></h2>
+{% if toc %}<p>Version {{ doc.version }} · {{ doc.total_sections }} sections</p><ul>{% for section in doc.sections %}<li><a href="{{ section.url }}">{{ section.number }} {{ section.title }}</a> (p. {{ section.page }})</li>{% endfor %}</ul><p>{% if doc.toc_previous %}<a href="{{ doc.toc_previous }}">Previous sections</a> · {% endif %}{% if doc.toc_next %}<a href="{{ doc.toc_next }}">Next sections</a>{% endif %}</p>
+{% else %}
+{% for section in doc.sections %}<h3 class="section-title"><a href="{{ section.url }}">§{{ section.number }} {{ highlighted(section.title_parts) }}</a></h3>
+{% if section.preview_parts %}<p class="excerpt">{{ highlighted(section.preview_parts) }}</p>{% endif %}
+{% if section.preview_source and section.preview_source!='body' %}<p class="match-note">Matched in {{ 'section title' if section.preview_source=='section_title' else 'specification title' }}.</p>{% endif %}
+<p class="breadcrumb">{{ doc.family|upper }} › {{ doc.spec }}{% for parent in section.parents %} › {{ parent.number }} {{ parent.title }}{% endfor %} › {{ section.number }} {{ section.title }}</p>
+{% endfor %}
+{% if not doc.sections and doc.evidence %}<p class="excerpt">{{ highlighted(doc.evidence.parts) }}</p><p class="match-note">Matched in specification title.</p>{% endif %}
+{% if doc.expanded_matches %}<p class="match-note">Related terms: {% for match in doc.expanded_matches %}{{ match.query }} → <strong>{{ match.matched }}</strong>{% if not loop.last %}; {% endif %}{% endfor %}.</p>{% endif %}
+<p class="result-meta">Version {{ doc.version }} · <a href="{{ doc.toc_url }}">Table of contents</a></p>
+{% endif %}
+</article>
+{% endfor %}
+{% if total and not documents and not glossary_entries %}<p>No results on this page. <a href="{{ page_url(1) }}">First page</a>.</p>{% endif %}
+{% if not total and not toc %}<p>No matches found. Check the spelling or use a specification number.</p>{% endif %}
+{% if not toc and pages>1 %}<nav class="pagination" aria-label="Search pages">{% if page>1 %}<a href="{{ page_url(page-1) }}" rel="prev">Previous</a>{% endif %}{% if page_numbers and page_numbers[0]>1 %}<a href="{{ page_url(1) }}">1</a> …{% endif %}{% for n in page_numbers %}{% if n==page %}<strong aria-current="page">{{ n }}</strong>{% else %}<a href="{{ page_url(n) }}">{{ n }}</a>{% endif %}{% endfor %}{% if page_numbers and page_numbers[-1]<pages %}… <a href="{{ page_url(pages) }}">{{ pages }}</a>{% endif %}{% if page<pages %}<a href="{{ page_url(page+1) }}" rel="next">Next</a>{% endif %}</nav>{% endif %}
+</main>{% endif %}
 <footer><hr><p>Source: <a href="https://www.etsi.org/deliver/">ETSI deliver</a></p></footer>
 </body></html>

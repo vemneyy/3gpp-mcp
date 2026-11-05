@@ -9,7 +9,7 @@ COPY requirements.lock ./
 RUN --mount=type=secret,id=proxy_ca \
     if [ -f /run/secrets/proxy_ca ]; then export PIP_CERT=/run/secrets/proxy_ca; fi; \
     python -m pip install --no-cache-dir -r requirements.lock
-COPY backend/app.py backend/text.py backend/search_engine.py backend/__init__.py ./backend/
+COPY backend/app.py backend/text.py backend/search_engine.py backend/highlight.py backend/__init__.py ./backend/
 COPY frontend/ ./frontend/
 RUN chmod -R a=rX /app
 USER 1000:1000
