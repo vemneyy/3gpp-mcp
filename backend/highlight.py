@@ -144,7 +144,7 @@ class Plan:
         )
 
 
-def evidence(plan, body, section_title, document_title):
+def evidence(plan, body, section_title, document_title, focus_plan=None):
     fields = [
         ("body", body, 2),
         ("section_title", section_title, 1),
@@ -152,7 +152,21 @@ def evidence(plan, body, section_title, document_title):
     ]
     candidates = []
     for source, text, preference in fields:
-        fragment = plan.fragment(text)
+        fragment = (focus_plan or plan).fragment(text)
+        if fragment and focus_plan is not None:
+            # Technology was established by the title/ancestor context. Select
+            # an actual procedure passage instead of chasing a late EPS/GUTI
+            # mention, but still highlight every query/variant in that passage.
+            fragment["parts"] = plan.parts(fragment["text"])
+            expansions = sorted(
+                {
+                    (query, m["word"])
+                    for m in plan.matches(fragment["text"])
+                    for _, query, literal in m["groups"]
+                    if not literal
+                }
+            )
+            fragment["expanded"] = [dict(query=a, matched=b) for a, b in expansions]
         if fragment:
             candidates.append(((*fragment["quality"], preference), source, fragment))
     if not candidates:

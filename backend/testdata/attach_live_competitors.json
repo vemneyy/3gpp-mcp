@@ -1,0 +1,277 @@
+[
+  {
+    "spec": "23.402",
+    "title": "Universal Mobile Telecommunications System (UMTS); LTE; Architecture enhancements for non-3GPP accesses",
+    "clause": "5.10.7",
+    "heading": "Attach",
+    "parents": [
+      {
+        "number": "5",
+        "title": "Functional Description and Procedures for 3GPP Accesses with PMIP-based S5/S8"
+      },
+      {
+        "number": "5.10",
+        "title": "PMIP-based S5/S8 procedures for GERAN/UTRAN over S4"
+      }
+    ],
+    "mentions": 1
+  },
+  {
+    "spec": "23.236",
+    "title": "Digital cellular telecommunications system (Phase 2+) (GSM); Universal Mobile Telecommunications System (UMTS); LTE; Intra-domain connection of Radio Access Network (RAN) nodes to multiple Core Network (CN) nodes",
+    "clause": "4.8.1",
+    "heading": "Attach",
+    "parents": [
+      {
+        "number": "4",
+        "title": "General Description"
+      },
+      {
+        "number": "4.8",
+        "title": "Support of combined mobility management procedures"
+      }
+    ],
+    "mentions": 3
+  },
+  {
+    "spec": "33.128",
+    "title": "Digital cellular telecommunications system (Phase 2+) (GSM); Universal Mobile Telecommunications System (UMTS); LTE; 5G; Security; Protocol and procedures for Lawful Interception (LI); Stage 3",
+    "clause": "6.3.2.2.3",
+    "heading": "Attach",
+    "parents": [
+      {
+        "number": "6",
+        "title": "Network Layer Based Interception"
+      },
+      {
+        "number": "6.3",
+        "title": "4G"
+      },
+      {
+        "number": "6.3.2",
+        "title": "LI at MME"
+      },
+      {
+        "number": "6.3.2.2",
+        "title": "Generation of xIRI over LI_X2"
+      }
+    ],
+    "mentions": 13
+  },
+  {
+    "spec": "23.272",
+    "title": "Digital cellular telecommunications system (Phase 2+) (GSM); Universal Mobile Telecommunications System (UMTS); LTE; Circuit Switched (CS) fallback in Evolved Packet System (EPS); Stage 2",
+    "clause": "5.2",
+    "heading": "Attach procedure",
+    "parents": [
+      {
+        "number": "5",
+        "title": "Mobility Management"
+      }
+    ],
+    "mentions": 36
+  },
+  {
+    "spec": "23.139",
+    "title": "Digital cellular telecommunications system (Phase 2+) (GSM); Universal Mobile Telecommunications System (UMTS); LTE; 3GPP system - fixed broadband access network interworking; Stage 2",
+    "clause": "7.2",
+    "heading": "Initial Attach",
+    "parents": [
+      {
+        "number": "7",
+        "title": "Functional Description and Procedures for Fixed Broadband Access network over S2b"
+      }
+    ],
+    "mentions": 0
+  },
+  {
+    "spec": "23.401",
+    "title": "LTE; General Packet Radio Service (GPRS) enhancements for Evolved Universal Terrestrial Radio Access Network (E-UTRAN) access",
+    "clause": "5.3.2.1",
+    "heading": "E-UTRAN Initial Attach",
+    "parents": [
+      {
+        "number": "5",
+        "title": "Functional description and information flows"
+      },
+      {
+        "number": "5.3",
+        "title": "Authentication, security and location management"
+      },
+      {
+        "number": "5.3.2",
+        "title": "Attach procedure"
+      }
+    ],
+    "mentions": 200
+  },
+  {
+    "spec": "36.300",
+    "title": "LTE; Evolved Universal Terrestrial Radio Access (E-UTRA) and Evolved Universal Terrestrial Radio Access Network (E-UTRAN); Overall description; Stage 2",
+    "clause": "4.7.6.1",
+    "heading": "RN attach procedure",
+    "parents": [
+      {
+        "number": "4",
+        "title": "Overall architecture"
+      },
+      {
+        "number": "4.7",
+        "title": "Support for relaying"
+      },
+      {
+        "number": "4.7.6",
+        "title": "Signalling procedures"
+      }
+    ],
+    "mentions": 8
+  },
+  {
+    "spec": "24.008",
+    "title": "Digital cellular telecommunications system (Phase 2+) (GSM); Universal Mobile Telecommunications System (UMTS); LTE; 5G; Mobile radio interface Layer 3 specification; Core network protocols; Stage 3",
+    "clause": "4.7.3",
+    "heading": "GPRS attach procedure",
+    "parents": [
+      {
+        "number": "4",
+        "title": "Elementary procedures for Mobility Management"
+      },
+      {
+        "number": "4.7",
+        "title": "Elementary mobility management procedures for GPRS services"
+      }
+    ],
+    "mentions": 40
+  },
+  {
+    "spec": "24.008",
+    "title": "Digital cellular telecommunications system (Phase 2+) (GSM); Universal Mobile Telecommunications System (UMTS); LTE; 5G; Mobile radio interface Layer 3 specification; Core network protocols; Stage 3",
+    "clause": "4.4.3",
+    "heading": "IMSI attach procedure",
+    "parents": [
+      {
+        "number": "4",
+        "title": "Elementary procedures for Mobility Management"
+      },
+      {
+        "number": "4.4",
+        "title": "MM specific procedures"
+      }
+    ],
+    "mentions": 9
+  },
+  {
+    "spec": "23.119",
+    "title": "Universal Mobile Telecommunications System (UMTS); LTE; Gateway Location Register (GLR); Stage 2",
+    "clause": "7.3.1",
+    "heading": "GPRS Attach Procedure",
+    "parents": [
+      {
+        "number": "7",
+        "title": "Functional Description"
+      },
+      {
+        "number": "7.3",
+        "title": "Packet Switched Service"
+      }
+    ],
+    "mentions": 0
+  },
+  {
+    "spec": "23.401",
+    "title": "LTE; General Packet Radio Service (GPRS) enhancements for Evolved Universal Terrestrial Radio Access Network (E-UTRAN) access",
+    "clause": "5.3.2.2",
+    "heading": "UTRAN/GERAN Initial Attach",
+    "parents": [
+      {
+        "number": "5",
+        "title": "Functional description and information flows"
+      },
+      {
+        "number": "5.3",
+        "title": "Authentication, security and location management"
+      },
+      {
+        "number": "5.3.2",
+        "title": "Attach procedure"
+      }
+    ],
+    "mentions": 2
+  },
+  {
+    "spec": "23.216",
+    "title": "Digital cellular telecommunications system (Phase 2+) (GSM); Universal Mobile Telecommunications System (UMTS); LTE; Single Radio Voice Call Continuity (SRVCC); Stage 2",
+    "clause": "6.1.1",
+    "heading": "E-UTRAN Attach procedure for SRVCC",
+    "parents": [
+      {
+        "number": "6",
+        "title": "Procedures and flows"
+      },
+      {
+        "number": "6.1",
+        "title": "SRVCC from E-UTRAN to 3GPP2 1xCS"
+      }
+    ],
+    "mentions": 4
+  },
+  {
+    "spec": "23.285",
+    "title": "Universal Mobile Telecommunications System (UMTS); LTE; Architecture enhancements for V2X services",
+    "clause": "5.5.1",
+    "heading": "E-UTRAN attach procedure for UE",
+    "parents": [
+      {
+        "number": "5",
+        "title": "Functional description and information flows"
+      },
+      {
+        "number": "5.5",
+        "title": "V2X impacts to EPC procedures"
+      }
+    ],
+    "mentions": 2
+  },
+  {
+    "spec": "24.301",
+    "title": "Universal Mobile Telecommunications System (UMTS); LTE; 5G; Non-Access-Stratum (NAS) protocol for Evolved Packet System (EPS); Stage 3",
+    "clause": "5.5.1.2.2",
+    "heading": "Attach procedure initiation",
+    "parents": [
+      {
+        "number": "5",
+        "title": "Elementary procedures for EPS mobility management"
+      },
+      {
+        "number": "5.5",
+        "title": "EMM specific procedures"
+      },
+      {
+        "number": "5.5.1",
+        "title": "Attach procedure"
+      },
+      {
+        "number": "5.5.1.2",
+        "title": "Attach procedure for EPS services"
+      }
+    ],
+    "mentions": 79
+  },
+  {
+    "spec": "23.216",
+    "title": "Digital cellular telecommunications system (Phase 2+) (GSM); Universal Mobile Telecommunications System (UMTS); LTE; Single Radio Voice Call Continuity (SRVCC); Stage 2",
+    "clause": "6.4.2",
+    "heading": "E-UTRAN Attach procedure for SRVCC",
+    "parents": [
+      {
+        "number": "6",
+        "title": "Procedures and flows"
+      },
+      {
+        "number": "6.4",
+        "title": "CS to PS SRVCC"
+      }
+    ],
+    "mentions": 1
+  }
+]

@@ -11,13 +11,15 @@ from backend.highlight import Plan, evidence
 from backend.text import normalize
 
 STOP = {"the", "a", "an", "of", "for", "and", "in", "on", "to", "with"}
-TECH = {
-    "4g": ("4g", "lte", "eps", "eutran"),
-    "5g": ("5g", "5gs", "5gc", "nr"),
-    "3g": ("3g", "umts", "utran"),
-    "2g": ("2g", "gsm", "geran"),
-}
-TECH_NAMES = {"lte": "4g", "eps": "4g", "umts": "3g", "gsm": "2g"}
+from backend.ranking_context import (
+    TECH,
+    TECH_NAMES,
+    technology_in,
+    context_quality,
+    subject_title,
+    with_ancestors,
+)
+
 FORMS = {
     "attach": ("attach", "attached", "attaches", "attaching"),
     "authenticate": ("authenticate", "authentication"),
@@ -36,14 +38,6 @@ def marks(items):
 def coverage(groups, title):
     words = set(title.split())
     return sum(bool(words.intersection(g)) for g in groups)
-
-
-def technology_in(title, tech):
-    if not tech:
-        return True
-    return bool(set(title.split()).intersection(TECH[tech])) or (
-        tech == "4g" and "e utran" in title
-    )
 
 
 NUMBER_QUERY = re.compile(
@@ -269,7 +263,7 @@ def rank_documents(
         {"whole": set(), "sections": set(), "docs": set()} if collect_scope else None
     )
 
-    def emit(did, sid, tier, score, title_hits, body_hits, reason):
+    def emit(did, sid, tier, score, title_hits, body_hits, reason, context=0):
         nonlocal total_hits
         if (
             allowed_scope is not None
@@ -287,8 +281,9 @@ def rank_documents(
         if not limit:
             return True
         tie = tuple(-ord(c) for c in metadata[did]["spec"]) + (0,)
-        key = (tier, round(score, 8), body_hits, tie, -(sid or 0))
-        item = (key, did, sid, title_hits, body_hits, reason)
+        effective_tier = tier + 6 * context if tech else tier
+        key = (effective_tier, round(score, 8), body_hits, tie, -(sid or 0))
+        item = (key, did, sid, title_hits, body_hits, reason, context)
         if len(hits) < limit:
             heapq.heappush(hits, item)
         elif item > hits[0]:
@@ -323,12 +318,20 @@ def rank_documents(
                 if phrase and (" " + phrase + " ") in (" " + doc["title_norm"] + " ")
                 else 0
             )
-            if emit(did, None, 4, 110 + phrase_bonus, cov, 0, "Specification title"):
+            context, _ = context_quality(
+                tech, subject_title(doc["title"]), [], doc["title"], words
+            )
+            if emit(
+                did, None, 4, 110 + phrase_bonus, cov, 0, "Specification title", context
+            ):
                 buckets[did] = {"count": 0}
     title_max = len(groups)
     rows, ordered_groups, dfs = section_candidates(db, groups, filters, args, tech)
     statistics = corpus_statistics(db) if ordered_groups else (1, 1, 1)
-    for row in rows:
+    contextual_rows = (
+        with_ancestors(db, rows, metadata) if tech else ((r, []) for r in rows)
+    )
+    for row, parents in contextual_rows:
         sid, did, title, number, length, title_length, body_tech = row[:7]
         frequencies = list(row[7:])
         tf = sum(frequencies[::2])
@@ -340,6 +343,9 @@ def rank_documents(
             continue
         heading = normalize(title)
         cov = coverage(groups, heading)
+        context, direct_technology = context_quality(
+            tech, heading, parents, doc["title"], words
+        )
         # Saturating frequency and length normalization prevent long appendices
         # from winning just because a token appears hundreds of times.
         bm25 = bm25f(frequencies, dfs, length, title_length, statistics)
@@ -403,6 +409,8 @@ def rank_documents(
             if heading_words.intersection(details):
                 score -= 12
         if tech:
+            if direct_technology:
+                score += 6
             score += 22 if tech_title else -12
             if tech_title:
                 named = sum(technology_in(doc["title_norm"], t) for t in TECH)
@@ -431,7 +439,14 @@ def rank_documents(
         exact_heading = heading == " ".join(requested or words)
         tier = 3 if exact_heading else 2 if cov == title_max else 1 if cov else 0
         if emit(
-            did, sid, tier, score, cov, tf, "Section title" if cov else "Section text"
+            did,
+            sid,
+            tier,
+            score,
+            cov,
+            tf,
+            "Section title" if cov else "Section text",
+            context,
         ):
             bucket = buckets.setdefault(did, {"count": 0})
             bucket["count"] += 1
@@ -452,12 +467,13 @@ def retrieve(db, q, filters, args, page_size, page, within=()):
     selected = sorted(hits, reverse=True)[(page - 1) * page_size : page * page_size]
     results = []
     wanted = []
-    for key, did, sid, th, bh, reason in selected:
+    for key, did, sid, th, bh, reason, context in selected:
         doc = {k: v for k, v in metadata[did].items() if k != "title_norm"}
         doc.update(
             sections=[],
             score=round(key[0] * 1_000_000 + min(key[1], 999_999), 6),
             lexical_score=key[1],
+            context_score=context,
             match_reason=reason,
         )
         if sid is not None:
@@ -486,6 +502,12 @@ def retrieve(db, q, filters, args, page_size, page, within=()):
             )
         }
     plan = Plan(" ".join(words), FORMS, TECH, TECH_NAMES, STOP)
+    focus_words = [w for w in words if w not in TECH and w not in TECH_NAMES]
+    focus_plan = (
+        Plan(" ".join(focus_words), FORMS, TECH, TECH_NAMES, STOP)
+        if focus_words
+        else None
+    )
     for doc in results:
         doc["title_parts"] = plan.parts(doc["title"])
         doc["spec_parts"] = (
@@ -499,7 +521,13 @@ def retrieve(db, q, filters, args, page_size, page, within=()):
         for section in doc["sections"]:
             content = contents[section["id"]]
             section.update({k: v for k, v in content.items() if k != "body"})
-            proof = evidence(plan, content["body"], section["title"], doc["title"])
+            proof = evidence(
+                plan,
+                content["body"],
+                section["title"],
+                doc["title"],
+                focus_plan=focus_plan if doc["context_score"] >= 3 else None,
+            )
             section["preview"] = proof["text"] if proof else ""
             section["preview_parts"] = proof["parts"] if proof else []
             section["preview_source"] = proof["source"] if proof else None

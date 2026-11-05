@@ -6,7 +6,6 @@
 <header><h1><a href="/">ETSI — 3GPP &amp; GSM Explorer</a></h1></header>
 {% if error %}<p role="alert">{{ error }}</p>{% else %}
 <main>
-<nav aria-label="Collections"><a href="/">Specifications</a> · <a href="/glossary{% if q %}?q={{ q|urlencode }}{% endif %}">Glossary</a></nav>
 <form class="search-form" action="{{ '/glossary' if glossary_mode else '/' }}" method="get" role="search">
 <label for="q">Search for</label>
 <input type="search" id="q" name="q" value="{{ q }}" maxlength="256" size="42">

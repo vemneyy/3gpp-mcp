@@ -150,7 +150,7 @@ def test_glossary_with_source(corpus):
     )
     assert entry["spec"] == "23.401" and entry["url"].endswith("#page=18")
     assert corpus.get("/glossary?q=MME").status_code == 200
-    assert "Glossary" in corpus.get("/?q=MME").text
+    assert 'aria-label="Collections"' not in corpus.get("/?q=MME").text
 
 
 def test_requested_procedure_detail_remains_searchable(corpus):

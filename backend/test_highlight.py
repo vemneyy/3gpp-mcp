@@ -63,3 +63,16 @@ def test_all_query_parts_in_a_compact_window():
         "PDU alone. " + "noise " * 100 + "A PDU-session starts now."
     )
     assert [p["text"] for p in fragment["parts"] if p["match"]] == ["PDU", "session"]
+
+
+def test_established_generation_does_not_force_a_late_special_case_excerpt():
+    full = Plan("4g attach", FORMS, TECH, TECH_NAMES, STOP)
+    core = Plan("attach", FORMS, TECH, TECH_NAMES, STOP)
+    body = (
+        "The Attach procedure registers the UE with the network. "
+        + ("Background. " * 80)
+        + "The IoT case uses EPS Attach without PDN Connectivity."
+    )
+    result = evidence(full, body, "E-UTRAN Initial Attach", "LTE; EPS", focus_plan=core)
+    assert result["text"].startswith("The Attach procedure")
+    assert any(p["match"] and p["text"] == "Attach" for p in result["parts"])
